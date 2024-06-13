@@ -1,11 +1,13 @@
 // Bibliotecas WiFi Esp32
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiManager.h>
 #include <WiFiAP.h>
 
 // Info rede Esp32
-const char *ssid = "Shadow";
-const char *password = "labi_118";
+IPAddress ip(192,168,8,222);
+IPAddress gateway(192,168,8,100);
+IPAddress subnet(255,255,255,0);
 WiFiServer server(80);
 
 // Biblioteca Servo Esp32
@@ -49,13 +51,20 @@ void PosPadrao();
 void Shadow();
 void Andar();
 void Acenar();
+void Sentar();
 
 void setup() {
   // Iniciar Serial
   Serial.begin(115200);
 
   // Configurações WiFi
-  WiFi.softAP(ssid, password);
+  WiFiManager wm;
+  bool res;
+  res = wm.autoConnect("Shadow","12345678");
+  WiFi.mode(WIFI_STA);
+  WiFi.config(ip, gateway, subnet);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
   server.begin();
   Serial.println("Server started");
 
@@ -100,6 +109,8 @@ void loop() {
         // acenar
         else if (currentLine.endsWith("GET /acenar")) acao = 3;
         
+        // sentar
+        else if (currentLine.endsWith("GET /sentar")) acao = 4;
       }
     }
   }
@@ -122,6 +133,11 @@ void loop() {
   // Acenar
   else if (acao == 3){
     Acenar();
+  }
+
+  // Sentar
+  else if (acao == 4){
+    Sentar();
   }
 }
 
@@ -216,4 +232,20 @@ void Acenar() {
       }
     }
     acao = 0;
+}
+
+void Sentar() {
+  OD.write(175);
+  OE.write(15);
+  Ca.write(90);
+  CE.write(90);
+  CD.write(90);
+  AE.write(110);
+  AD.write(70);
+  LE.write(95);
+  LD.write(85);
+  FE.write(0);
+  FD.write(180);
+  JE.write(90);
+  JD.write(90);
 }
