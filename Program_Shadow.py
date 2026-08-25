@@ -1,21 +1,266 @@
-# Importação de bibliotecas OpenCV, MediaPipe, Math e PySerial
+# Importação de bibliotecas OpenCV, MediaPipe, Math, NumPy e PySerial
 import cv2
 import mediapipe as mp
-from math import degrees, sqrt, atan
+import math
+import numpy as np
 import serial
 
+# ============================================================
+# Configurações e constantes
+# ============================================================
+
 # Declaração porta do ESP32
-porta = '/dev/ttyUSB0'  # Coloque entre as aspas simples a posta serial do Esp32
+porta = '/dev/ttyUSB0'  # Coloque entre as aspas simples a porta serial do Esp32
 velocComunc = 115200  # Coloque aqui a velocidade da comunicação serial
 
 # Definindo cores
 corPontos = (0, 0, 255)
 corTexto = (0, 0, 0)
+corHudTexto = (255, 255, 255)
+corHudBorda = (0, 0, 0)
 amarelo = (200, 200, 0)
 magenta = (200, 0, 200)
 ciano = (0, 200, 200)
 
-# Loop de menu, perguntar o usuário de deseja conectar ao Esp32
+# Configuração da MediaPipe Pose
+# model_complexity: 0=lite, 1=full, 2=heavy. Heavy tem Z bem mais estável, custa CPU.
+MODEL_COMPLEXITY = 2
+
+# Gate de visibilidade: landmarks com visibility abaixo disso são ignorados,
+# e o último valor de servo é reusado.
+VIS_THRESHOLD = 0.5
+
+# Parâmetros do One Euro Filter (Casiez, Roussel, Vogel 2012)
+# min_cutoff: cutoff base (Hz) — menor = mais suave parado
+# beta: sensibilidade à velocidade — maior = menos lag em movimento rápido
+# d_cutoff: cutoff da derivada (Hz)
+ONE_EURO_MIN_CUTOFF = 1.0
+ONE_EURO_BETA = 0.007
+ONE_EURO_DCUTOFF = 1.0
+
+# Mapeamento de cada eixo do robô para servo (mantém ranges numéricos do firmware).
+# zero_deg: valor de servo na pose neutra (vem de PosPadrao() no .ino)
+# scale: multiplicador do ângulo em graus (normalmente 1.0)
+# invert: True inverte o sentido do movimento (flipar se o servo mover ao contrário no teste)
+# lo/hi: clamp do valor final enviado ao servo
+SERVO_MAP = {
+    'OD': {'zero_deg': 175, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Ombro Direito (abd)
+    'OE': {'zero_deg':  15, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Ombro Esquerdo (abd)
+    'Ca': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Cabeça (yaw)
+    'CE': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Frontal Braço Esquerdo (flex)
+    'CD': {'zero_deg':  90, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Frontal Braço Direito (flex)
+    'AE': {'zero_deg': 110, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Antebraço Esquerdo (cotovelo)
+    'AD': {'zero_deg':  70, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Antebraço Direito (cotovelo)
+    'LE': {'zero_deg':  95, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Lateral Perna Esquerdo (abd)
+    'LD': {'zero_deg':  85, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Lateral Perna Direito (abd)
+    'FE': {'zero_deg':  70, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Frontal Perna Esquerdo (flex)
+    'FD': {'zero_deg': 110, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Frontal Perna Direito (flex)
+    'JE': {'zero_deg':  70, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Joelho Esquerdo
+    'JD': {'zero_deg': 120, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Joelho Direito
+}
+
+# ============================================================
+# One Euro Filter
+# ============================================================
+
+class OneEuroFilter:
+    """
+    Filtro passa-baixa adaptativo: cutoff aumenta com |derivada|,
+    reduzindo tremor parado sem introduzir lag em movimento rápido.
+    """
+    def __init__(self, min_cutoff=1.0, beta=0.007, d_cutoff=1.0):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self.x_prev = None
+        self.dx_prev = 0.0
+        self.t_prev = None
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def __call__(self, x, t):
+        if self.t_prev is None:
+            self.t_prev = t
+            self.x_prev = x
+            return x
+        dt = t - self.t_prev
+        if dt <= 0:
+            return self.x_prev
+        dx = (x - self.x_prev) / dt
+        a_d = self._alpha(self.d_cutoff, dt)
+        dx_hat = a_d * dx + (1 - a_d) * self.dx_prev
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = self._alpha(cutoff, dt)
+        x_hat = a * x + (1 - a) * self.x_prev
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        self.t_prev = t
+        return x_hat
+
+
+# Dict de filtros: uma instância por (nome_landmark, eixo)
+_filters = {}
+
+def filter_landmark(name, xyz, t):
+    """Aplica One Euro Filter em cada componente xyz de um landmark."""
+    out = np.empty(3, dtype=np.float64)
+    for i, axis in enumerate('xyz'):
+        key = (name, axis)
+        if key not in _filters:
+            _filters[key] = OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_DCUTOFF)
+        out[i] = _filters[key](xyz[i], t)
+    return out
+
+
+# ============================================================
+# Geometria: body frame e ângulos
+# ============================================================
+
+def _normalize(v):
+    n = np.linalg.norm(v)
+    if n < 1e-9:
+        return v
+    return v / n
+
+def body_frame(W):
+    """
+    Constrói frame torso-centrado a partir de LS, RS, LH, RH.
+    Retorna (hip_mid, R) onde R é 3x3, colunas [x_body, y_body, z_body].
+    """
+    sh_mid = 0.5 * (W['SHOULDER_L'] + W['SHOULDER_R'])
+    hip_mid = 0.5 * (W['HIP_L'] + W['HIP_R'])
+    y_body = _normalize(sh_mid - hip_mid)               # para cima (coluna)
+    x_raw = W['SHOULDER_L'] - W['SHOULDER_R']           # lado esquerdo do sujeito
+    x_body = _normalize(x_raw - np.dot(x_raw, y_body) * y_body)
+    z_body = np.cross(x_body, y_body)                   # para frente (peito)
+    R = np.column_stack([x_body, y_body, z_body])
+    return hip_mid, R
+
+def to_body(R, v):
+    """Converte vetor do frame de mundo para o frame do corpo."""
+    return R.T @ v
+
+def angle_shoulder_abd(W, R, side):
+    """Abdução de ombro: 0=braço p/ baixo, +=abdução."""
+    s, e = f'SHOULDER_{side}', f'ELBOW_{side}'
+    v = to_body(R, W[e] - W[s])
+    return math.atan2(v[0], -v[1])
+
+def angle_shoulder_flex(W, R, side):
+    """Flexão de ombro: 0=braço p/ baixo, +=braço p/ frente."""
+    s, e = f'SHOULDER_{side}', f'ELBOW_{side}'
+    v = to_body(R, W[e] - W[s])
+    return math.atan2(v[2], -v[1])
+
+def angle_elbow(W, R, side):
+    """Flexão de cotovelo: 0=braço reto, pi/2=dobrado 90°."""
+    s, e, wr = f'SHOULDER_{side}', f'ELBOW_{side}', f'WRIST_{side}'
+    u = to_body(R, W[s] - W[e])
+    w = to_body(R, W[wr] - W[e])
+    nu, nw = np.linalg.norm(u), np.linalg.norm(w)
+    if nu < 1e-9 or nw < 1e-9:
+        return 0.0
+    c = np.clip(np.dot(u, w) / (nu * nw), -1.0, 1.0)
+    return math.pi - math.acos(c)
+
+def angle_hip_abd(W, R, side):
+    """Abdução de quadril: 0=perna p/ baixo, +=perna p/ lado."""
+    h, k = f'HIP_{side}', f'KNEE_{side}'
+    v = to_body(R, W[k] - W[h])
+    return math.atan2(v[0], -v[1])
+
+def angle_hip_flex(W, R, side):
+    """Flexão de quadril: 0=perna p/ baixo, +=perna p/ frente."""
+    h, k = f'HIP_{side}', f'KNEE_{side}'
+    v = to_body(R, W[k] - W[h])
+    return math.atan2(v[2], -v[1])
+
+def angle_knee(W, R, side):
+    """Flexão de joelho: 0=perna reta, pi/2=dobrada 90°."""
+    h, k, hl = f'HIP_{side}', f'KNEE_{side}', f'HEEL_{side}'
+    u = to_body(R, W[h] - W[k])
+    w = to_body(R, W[hl] - W[k])
+    nu, nw = np.linalg.norm(u), np.linalg.norm(w)
+    if nu < 1e-9 or nw < 1e-9:
+        return 0.0
+    c = np.clip(np.dot(u, w) / (nu * nw), -1.0, 1.0)
+    return math.pi - math.acos(c)
+
+def angle_head_yaw(W, R):
+    """Yaw da cabeça: 0=olhando p/ frente, +=virou p/ direita."""
+    sh_mid_world = 0.5 * (W['SHOULDER_L'] + W['SHOULDER_R'])
+    head = to_body(R, W['NOSE'] - sh_mid_world)
+    return math.atan2(head[0], head[2])
+
+
+def map_angle_to_servo(theta_rad, spec):
+    """Mapeia ângulo em radianos para valor inteiro de servo, respeitando zero e sentido."""
+    deg = math.degrees(theta_rad) * spec['scale']
+    if spec['invert']:
+        deg = -deg
+    val = int(round(spec['zero_deg'] + deg))
+    return max(spec['lo'], min(spec['hi'], val))
+
+
+# ============================================================
+# Landmarks 3D e visibilidade
+# ============================================================
+
+# Mapa nome_local -> PoseLandmark
+_LM_MAP = None
+
+def _init_lm_map(pose_mod):
+    global _LM_MAP
+    if _LM_MAP is None:
+        _LM_MAP = {
+            'NOSE':       pose_mod.PoseLandmark.NOSE,
+            'SHOULDER_L': pose_mod.PoseLandmark.LEFT_SHOULDER,
+            'SHOULDER_R': pose_mod.PoseLandmark.RIGHT_SHOULDER,
+            'HIP_L':      pose_mod.PoseLandmark.LEFT_HIP,
+            'HIP_R':      pose_mod.PoseLandmark.RIGHT_HIP,
+            'ELBOW_L':    pose_mod.PoseLandmark.LEFT_ELBOW,
+            'ELBOW_R':    pose_mod.PoseLandmark.RIGHT_ELBOW,
+            'WRIST_L':    pose_mod.PoseLandmark.LEFT_WRIST,
+            'WRIST_R':    pose_mod.PoseLandmark.RIGHT_WRIST,
+            'KNEE_L':     pose_mod.PoseLandmark.LEFT_KNEE,
+            'KNEE_R':     pose_mod.PoseLandmark.RIGHT_KNEE,
+            'HEEL_L':     pose_mod.PoseLandmark.LEFT_HEEL,
+            'HEEL_R':     pose_mod.PoseLandmark.RIGHT_HEEL,
+        }
+    return _LM_MAP
+
+def extract_world_landmarks(world_landmarks, visibilities, t):
+    """Puxa landmarks 3D, aplica One Euro Filter, e retorna dict W + dict Vis."""
+    W, Vis = {}, {}
+    for name, lm_id in _LM_MAP.items():
+        lm = world_landmarks.landmark[lm_id]
+        xyz = np.array([lm.x, lm.y, lm.z], dtype=np.float64)
+        W[name] = filter_landmark(name, xyz, t)
+        Vis[name] = visibilities.landmark[lm_id].visibility
+    return W, Vis
+
+def visible(Vis, names):
+    return all(Vis[n] >= VIS_THRESHOLD for n in names)
+
+
+# ============================================================
+# HUD
+# ============================================================
+
+def put_hud(img, text, xy, offset=(8, -4)):
+    """Desenha texto pequeno com borda preta para contraste."""
+    x, y = int(xy[0]) + offset[0], int(xy[1]) + offset[1]
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, corHudBorda, 2, cv2.LINE_AA)
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, corHudTexto, 1, cv2.LINE_AA)
+
+
+# ============================================================
+# Menu de conexão com ESP
+# ============================================================
+
 while True:
     conecEsp = str(input('Deseja conectar com esp?\n'
                          '\033[34m[ 1 ]\033[m - \033[34mSIM\033[m\n'
@@ -26,7 +271,6 @@ while True:
     else:
         print('\033[35mINVÁLIDO!\033[m Insira 1 ou 2\n')
 
-# Sendo a resposta do loop SIM, tentar fazer conecção serial
 if conecEsp == '1':
     while True:
         try:
@@ -36,272 +280,127 @@ if conecEsp == '1':
         except:
             pass
 
-# Declarações de vídeo
-video = cv2.VideoCapture(0)  # Altere esse valor para trocar de câmera
+
+# ============================================================
+# Init câmera + MediaPipe
+# ============================================================
+
+video = cv2.VideoCapture(0)
 pose = mp.solutions.pose
 Pose = pose.Pose(min_tracking_confidence=0.75,
-                 min_detection_confidence=0.75)  # Altere esses valores para definir a minima precisão para detecção
+                 min_detection_confidence=0.75,
+                 model_complexity=MODEL_COMPLEXITY)
 draw = mp.solutions.drawing_utils
+_init_lm_map(pose)
 
-# Loop de execução (Reconhecimento e comunicação)
+# Estado: último valor de servo (para reusar quando visibilidade cai)
+last_servo = {k: v['zero_deg'] for k, v in SERVO_MAP.items()}
+
+
+# ============================================================
+# Loop principal
+# ============================================================
+
 while True:
-    conectado, vid = video.read()  # Coloca em "vid" as imagens recebidas pela câmera
-    vid = cv2.resize(vid, (0, 0), fx=1.7, fy=1.7)  # Zoom em vid
-    results = Pose.process(vid)  # Processamento de Vid
-    points = results.pose_landmarks  # Calcula os pontos
-    # draw.draw_landmarks(vid, points, pose.POSE_CONNECTIONS)  # Retire o comentário dessa linha mostrar todos os pontos
+    conectado, vid = video.read()
+    if not conectado:
+        continue
+    vid = cv2.resize(vid, (0, 0), fx=1.7, fy=1.7)
+    results = Pose.process(vid)
+    points = results.pose_landmarks
+    world_points = results.pose_world_landmarks
 
-    h, w, _ = vid.shape  # Armazena altura e largura do vídeo
+    h, w, _ = vid.shape
 
-    # Tendo encontrado uma pessoa, armazena informações
-    if points:
-        nariz = points.landmark[pose.PoseLandmark.NOSE]  # Armazena coordenadas do ponto do nariz
-        cv2.circle(vid, (int(nariz.x * w), int(nariz.y * h)), 2, corPontos, 2)  # Ponto na imagem
+    if points and world_points:
+        # ---- Overlay 2D: círculos e posições dos pontos ----
+        nariz = points.landmark[pose.PoseLandmark.NOSE]
+        cv2.circle(vid, (int(nariz.x * w), int(nariz.y * h)), 2, corPontos, 2)
 
-        ombroE = points.landmark[pose.PoseLandmark.LEFT_SHOULDER]  # Armazena coordenadas do ponto do ombro esquerdo
-        cv2.circle(vid, (int(ombroE.x * w), int(ombroE.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        ombroE = points.landmark[pose.PoseLandmark.LEFT_SHOULDER]
+        cv2.circle(vid, (int(ombroE.x * w), int(ombroE.y * h)), 2, corPontos, 2)
 
-        ombroD = points.landmark[pose.PoseLandmark.RIGHT_SHOULDER]  # Armazena coordenadas do ponto do ombro direito
-        cv2.circle(vid, (int(ombroD.x * w), int(ombroD.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        ombroD = points.landmark[pose.PoseLandmark.RIGHT_SHOULDER]
+        cv2.circle(vid, (int(ombroD.x * w), int(ombroD.y * h)), 2, corPontos, 2)
 
-        quadrilE = points.landmark[pose.PoseLandmark.LEFT_HIP]  # Armazena coordenadas do ponto do quadril a esquerda
-        cv2.circle(vid, (int(quadrilE.x * w), int(quadrilE.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        quadrilE = points.landmark[pose.PoseLandmark.LEFT_HIP]
+        cv2.circle(vid, (int(quadrilE.x * w), int(quadrilE.y * h)), 2, corPontos, 2)
 
-        quadrilD = points.landmark[pose.PoseLandmark.RIGHT_HIP]  # Armazena coordenadas do ponto do quadril a direita
-        cv2.circle(vid, (int(quadrilD.x * w), int(quadrilD.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        quadrilD = points.landmark[pose.PoseLandmark.RIGHT_HIP]
+        cv2.circle(vid, (int(quadrilD.x * w), int(quadrilD.y * h)), 2, corPontos, 2)
 
-        cotoveloE = points.landmark[pose.PoseLandmark.LEFT_ELBOW]  # Armazena coordenadas do ponto do cotovelo esquerdo
-        cv2.circle(vid, (int(cotoveloE.x * w), int(cotoveloE.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        cotoveloE = points.landmark[pose.PoseLandmark.LEFT_ELBOW]
+        cv2.circle(vid, (int(cotoveloE.x * w), int(cotoveloE.y * h)), 2, corPontos, 2)
 
-        cotoveloD = points.landmark[pose.PoseLandmark.RIGHT_ELBOW]  # Armazena coordenadas do ponto do cotovelo direito
-        cv2.circle(vid, (int(cotoveloD.x * w), int(cotoveloD.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        cotoveloD = points.landmark[pose.PoseLandmark.RIGHT_ELBOW]
+        cv2.circle(vid, (int(cotoveloD.x * w), int(cotoveloD.y * h)), 2, corPontos, 2)
 
-        joelhoE = points.landmark[pose.PoseLandmark.LEFT_KNEE]  # Armazena coordenadas do ponto do joelho esquerdo
-        cv2.circle(vid, (int(joelhoE.x * w), int(joelhoE.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        joelhoE = points.landmark[pose.PoseLandmark.LEFT_KNEE]
+        cv2.circle(vid, (int(joelhoE.x * w), int(joelhoE.y * h)), 2, corPontos, 2)
 
-        joelhoD = points.landmark[pose.PoseLandmark.RIGHT_KNEE]  # Armazena coordenadas do ponto do joelho direito
-        cv2.circle(vid, (int(joelhoD.x * w), int(joelhoD.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        joelhoD = points.landmark[pose.PoseLandmark.RIGHT_KNEE]
+        cv2.circle(vid, (int(joelhoD.x * w), int(joelhoD.y * h)), 2, corPontos, 2)
 
-        calcanharE = points.landmark[pose.PoseLandmark.LEFT_HEEL]  # Armazena coordenadas do ponto do calcanhar esquerdo
-        cv2.circle(vid, (int(calcanharE.x * w), int(calcanharE.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        calcanharE = points.landmark[pose.PoseLandmark.LEFT_HEEL]
+        cv2.circle(vid, (int(calcanharE.x * w), int(calcanharE.y * h)), 2, corPontos, 2)
 
-        calcanharD = points.landmark[pose.PoseLandmark.RIGHT_HEEL]  # Armazena coordenadas do ponto do calcanhar direito
-        cv2.circle(vid, (int(calcanharD.x * w), int(calcanharD.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        calcanharD = points.landmark[pose.PoseLandmark.RIGHT_HEEL]
+        cv2.circle(vid, (int(calcanharD.x * w), int(calcanharD.y * h)), 2, corPontos, 2)
 
-        maoE = points.landmark[pose.PoseLandmark.LEFT_WRIST]  # Armazena coordenadas do ponto do punho esquerdo
-        cv2.circle(vid, (int(maoE.x * w), int(maoE.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        maoE = points.landmark[pose.PoseLandmark.LEFT_WRIST]
+        cv2.circle(vid, (int(maoE.x * w), int(maoE.y * h)), 2, corPontos, 2)
 
-        maoD = points.landmark[pose.PoseLandmark.RIGHT_WRIST]  # Armazena coordenadas do ponto do punho direito
-        cv2.circle(vid, (int(maoD.x * w), int(maoD.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        maoD = points.landmark[pose.PoseLandmark.RIGHT_WRIST]
+        cv2.circle(vid, (int(maoD.x * w), int(maoD.y * h)), 2, corPontos, 2)
 
-        peE = points.landmark[pose.PoseLandmark.LEFT_FOOT_INDEX]  # Armazena coordenadas do ponto do pé esquerdo
-        cv2.circle(vid, (int(peE.x * w), int(peE.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        peE = points.landmark[pose.PoseLandmark.LEFT_FOOT_INDEX]
+        cv2.circle(vid, (int(peE.x * w), int(peE.y * h)), 2, corPontos, 2)
 
-        peD = points.landmark[pose.PoseLandmark.RIGHT_FOOT_INDEX]  # Armazena coordenadas do ponto do pé direito
-        cv2.circle(vid, (int(peD.x * w), int(peD.y * h)), 2, corPontos, 2)  # Ponto na imagem
+        peD = points.landmark[pose.PoseLandmark.RIGHT_FOOT_INDEX]
+        cv2.circle(vid, (int(peD.x * w), int(peD.y * h)), 2, corPontos, 2)
 
-        # Desenhos de teste
-        """
-        cv2.line(vid, (int(quadrilE.x * w), int(quadrilE.y * h)), (int(joelhoE.x * w), int(joelhoE.y * h)), amarelo, 2)
-        cv2.line(vid, (int(quadrilE.x * w), int(quadrilE.y * h)), (int(quadrilE.x * w), int(joelhoE.y * h)), ciano, 2)
-        cv2.line(vid, (int(joelhoE.x * w), int(joelhoE.y * h)), (int(quadrilE.x * w), int(joelhoE.y * h)), magenta, 2)
+        # ---- Extrai world landmarks 3D com filtro temporal ----
+        t_now = cv2.getTickCount() / cv2.getTickFrequency()
+        W, Vis = extract_world_landmarks(world_points, points, t_now)
 
-        cv2.line(vid, (int(ombroD.x * w), int(ombroD.y * h)), (int(ombroD.x * w), int(cotoveloD.y * h)), amarelo,2)
-        cv2.line(vid, (int(cotoveloD.x * w), int(cotoveloD.y * h)), (int(ombroD.x * w), int(cotoveloD.y * h)), ciano, 2)
-        cv2.line(vid, (int(cotoveloD.x * w), int(cotoveloD.y * h)), (int(ombroD.x * w), int(ombroD.y * h)), magenta, 2)
-        """
-        # Calculos
+        # ---- Body frame ----
+        torso_ok = visible(Vis, ['SHOULDER_L', 'SHOULDER_R', 'HIP_L', 'HIP_R'])
+        if torso_ok:
+            _, Rmat = body_frame(W)
+        else:
+            Rmat = None
 
-        # Ângulo lateral braço esquerdo
-        # Pelas coordenadas tem-se um triângulo retângulo de forma que seus vértices são os pares de coordenadas:
-        # 1. X e Y do ponto no Ombro Esquerdo;
-        # 2. X e Y do ponto no Cotovelo Esquerdo;
-        # 3. X do ponto no Ombro Esquerdo e Y do ponto no Cotovelo Esquerdo.
-        #
-        # Ligando estas arestas tem-se os vértices do triângulo retângulo, tal que:
-        # CO = Comprimento do cateto oposto ao ângulo desejado (ombroE.x - cotoveloE.x)
-        # CA = Comprimento do cateto adjacente ao ângulo desejado (ombroE.y - cotoveloE.y)
-        #
-        # A partir desses segmentos, podemos obter a tangente do ângulo desejado por CO / CA.
-        # Utilizamos a função de arco tangente para obter o ângulo em radiano e por último a
-        # função que converte esse ângulo em graus.
-        angBe = int(  # Inteiro
-            degrees(  # Converte radiano em graus
-                atan(  # Arco tangente (arc tg) (transformar a tg em ângulo [rad])
-                    (ombroE.x - cotoveloE.x) / (ombroE.y - cotoveloE.y))))  # Cateto oposto / adjacente (tg)
-        # Limitadores
-        if cotoveloE.x < ombroE.x and cotoveloE.y > ombroE.y:
-            angBe = 0
-        elif cotoveloE.x < ombroE.x and cotoveloE.y < ombroE.y:
-            angBe = 180
-        elif angBe < 0:
-            angBe = 180 + angBe
+        # ---- Cálculo dos 13 ângulos ----
+        # Nomes de variável preservados do código original para o bloco de envio.
 
-        # Ângulo lateral braço direito
-        # De forma análoga ao mesmo ângulo no braço esquerdo, pelas coordenadas dos pontos:
-        # 1. X e Y do ponto no Ombro Direito;
-        # 2. X e Y do ponto no Cotovelo Direito;
-        # 3. X do ponto no Ombro Direito e Y do ponto no Cotovelo Direito.
-        #
-        # Ligando estas arestas tem-se os vértices do triângulo retângulo, tal que:
-        # CO = Comprimento do cateto oposto ao ângulo desejado (ombroD.x - cotoveloD.x)
-        # CA = Comprimento do cateto adjacente ao ângulo desejado (ombroD.y - cotoveloD.y)
-        #
-        # A partir desses segmentos, podemos obter a tangente do ângulo desejado por CO / CA.
-        # Utilizamos a função de arco tangente para obter o ângulo em radiano e por último a
-        # função que converte esse ângulo em graus.
-        angBd = int(  # Inteiro
-            degrees(  # Converte radiano em graus
-                atan(  # Arco tangente (arc tg) (transformar a tg em ângulo [rad])
-                    (ombroD.x - cotoveloD.x) / (ombroD.y - cotoveloD.y))))  # Cateto oposto / adjacente (tg)
-        # Limitadores
-        if cotoveloD.x > ombroD.x and cotoveloD.y > ombroD.y:
-            angBd = 180
-        elif cotoveloD.x > ombroD.x and cotoveloD.y < ombroD.y:
-            angBd = 0
-        elif angBd < 0:
-            angBd = 180 + angBd
+        def _compute(key, need, fn):
+            if Rmat is not None and visible(Vis, need):
+                val = map_angle_to_servo(fn(), SERVO_MAP[key])
+                last_servo[key] = val
+            return last_servo[key]
 
-        # Ângulo lateral cabeça
-        # O ângulo da cabeça vem da proporção da distância δ em relação a distância dos ombros, em que
-        # δ / ED = angC / 180, tal que:
-        # δ = Distância entre o ombro esquerdo e o segmento da altura
-        # ED = Distância entre os ombros (sqrt(((ombroD.x - ombroE.x) ** 2) + ((ombroD.y - ombroE.y) ** 2)))
-        # angC = Ângulo desejado
-        #
-        # Proporção δ entre nariz e ombro -> δ = (ED² + EN² - DN²) / ED, tal que:
-        # δ = Distância entre o ombro esquerdo e o segmento da altura
-        # ED = Distância entre os ombros (sqrt(((ombroD.x - ombroE.x) ** 2) + ((ombroD.y - ombroE.y) ** 2)))
-        # EN = Distância entre ombro esquerdo e nariz (sqrt(((ombroE.x - nariz.x) ** 2) + ((ombroE.y - nariz.y) ** 2)))
-        # DN = Distância entre ombro direito e nariz (sqrt(((ombroD.x - nariz.x) ** 2) + ((ombroD.y - nariz.y) ** 2)))
-        #
-        # Dessa forma angC = ((ED² + EN² - DN²) * 180) / 2ED =
-        # ((((sqrt(((ombroD.x - ombroE.x) ** 2) + ((ombroD.y - ombroE.y) ** 2))) ** 2) +
-        # ((sqrt(((ombroE.x - nariz.x) ** 2) + ((ombroE.y - nariz.y) ** 2))) ** 2) -
-        # ((sqrt(((ombroD.x - nariz.x) ** 2) + ((ombroD.y - nariz.y) ** 2))) ** 2)) * 180) /
-        # (2 * ((sqrt(((ombroD.x - ombroE.x) ** 2) + ((ombroD.y - ombroE.y) ** 2))) ** 2) =
-        #
-        # (((ombroD.x - ombroE.x) ** 2 + (ombroD.y - ombroE.y) ** 2) +
-        # ((ombroE.x - nariz.x) ** 2 + (ombroE.y - nariz.y) ** 2) -
-        # ((ombroD.x - nariz.x) ** 2 + (ombroD.y - nariz.y) ** 2)) * 180 /
-        # (2 * ((ombroD.x - ombroE.x) ** 2 + (ombroD.y - ombroE.y) ** 2))
-        #
-        # Além disso, fez-se necessária a inversão do ângulo, que ficou 180 - valor calculado
-        auxCab = (((((ombroD.x - ombroE.x) ** 2) + ((ombroD.y - ombroE.y) ** 2)) +  # ED² +
-                   (((ombroE.x - nariz.x) ** 2) + ((ombroE.y - nariz.y) ** 2)) -  # EN² -
-                   (((ombroD.x - nariz.x) ** 2) + ((ombroD.y - nariz.y) ** 2))) /  # DN² /
-                  (2 * sqrt(((ombroD.x - ombroE.x) ** 2) + ((ombroD.y - ombroE.y) ** 2))))  # 2ED
-        angC = (180 -  # Inversão do ângulo
-                int(auxCab * 180 / (  # ((ED² + EN² - DN²) * 180) /
-                    sqrt(((ombroD.x - ombroE.x) ** 2) + ((ombroD.y - ombroE.y) ** 2)))))  # ED
+        # Ombro (abdução)
+        angBd = _compute('OD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_abd(W, Rmat, 'R'))
+        angBe = _compute('OE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_abd(W, Rmat, 'L'))
+        # Cabeça (yaw)
+        angC  = _compute('Ca', ['NOSE', 'SHOULDER_L', 'SHOULDER_R'], lambda: angle_head_yaw(W, Rmat))
+        # Ombro (flexão frontal)
+        angBraE = _compute('CE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_flex(W, Rmat, 'L'))
+        angBraD = _compute('CD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_flex(W, Rmat, 'R'))
+        # Cotovelo
+        angCotE = _compute('AE', ['SHOULDER_L', 'ELBOW_L', 'WRIST_L'], lambda: angle_elbow(W, Rmat, 'L'))
+        angCotD = _compute('AD', ['SHOULDER_R', 'ELBOW_R', 'WRIST_R'], lambda: angle_elbow(W, Rmat, 'R'))
+        # Perna (abdução lateral)
+        angPe = _compute('LE', ['HIP_L', 'KNEE_L'], lambda: angle_hip_abd(W, Rmat, 'L'))
+        angPd = _compute('LD', ['HIP_R', 'KNEE_R'], lambda: angle_hip_abd(W, Rmat, 'R'))
+        # Perna (flexão frontal)
+        angCoxE = _compute('FE', ['HIP_L', 'KNEE_L'], lambda: angle_hip_flex(W, Rmat, 'L'))
+        angCoxD = _compute('FD', ['HIP_R', 'KNEE_R'], lambda: angle_hip_flex(W, Rmat, 'R'))
+        # Joelho
+        angJe = _compute('JE', ['HIP_L', 'KNEE_L', 'HEEL_L'], lambda: angle_knee(W, Rmat, 'L'))
+        angJd = _compute('JD', ['HIP_R', 'KNEE_R', 'HEEL_R'], lambda: angle_knee(W, Rmat, 'R'))
 
-        # Limitadores
-        if angC > 180:
-            angC = 180
-        elif angC < 0:
-            angC = 0
-
-        # Alturas tronco por Teorema de Pitágoras
-        comObrQuadE = sqrt((quadrilE.x - ombroE.x) ** 2 + (quadrilE.y - ombroE.y) ** 2)
-        comObrQuadD = sqrt((quadrilD.x - ombroD.x) ** 2 + (quadrilD.y - ombroD.y) ** 2)
-
-        # Calcula o comprimento do cotovelo ao ombro esquerdo
-        # Comprimento dado pelo Teorema de Pitágoras utilizando dos pontos do cotovelo e ombro esquerdo
-        comBracoE = sqrt(((cotoveloE.y - ombroE.y) ** 2) + ((cotoveloE.x - ombroE.x) ** 2))
-        # Ângulo frontal braço esquerdo
-        # Ângulo dado pela relação comBracoE / comObrQuadE = angBraE / 180
-        angBraE = int(  # Inteiro
-            comBracoE * 180 / comObrQuadE)  # Proporção comprimento ângulo
-
-        # Calcula o comprimento do cotovelo ao ombro direito
-        # Comprimento dado pelo Teorema de Pitágoras utilizando dos pontos do cotovelo e ombro direito
-        comBracoD = sqrt(((cotoveloD.y - ombroD.y) ** 2) + ((cotoveloD.x - ombroD.x) ** 2))
-        # Ângulo frontal braço direito
-        # Ângulo dado pela relação comBracoD / comObrQuadD = angBraD / 180
-        # Sendo necessária a inversão do ângulo é retirado de 180 o valor calculado
-        angBraD = int(  # Inteiro
-            180 -  # Inversão do ângulo
-            comBracoD * 180 / comObrQuadD)  # Proporção comprimento ângulo
-
-        # Calcula o comprimento do cotovelo a mão esquerda
-        # Comprimento dado pelo Teorema de Pitágoras utilizando dos pontos do cotovelo e do pulso esquerdo
-        comAntBracoE = sqrt(((maoE.y - cotoveloE.y) ** 2) + ((maoE.x - cotoveloE.x) ** 2))
-        # Ângulo cotovelo esquerdo
-        # Ângulo dado pela relação comAntBracoE / comObrQuadE = angCotE / 180
-        # Sendo necessária a inversão do ângulo é retirado de 180 o valor calculado
-        # Na tentativa de compensar o ângulo frontal do braço, o valor calculado soma-se a 90 - ângulo frontal do braço
-        angCotE = (90 - angBraE +  # Compensação
-                   int(  # Inteiro
-                       180 -  # Inversão do ângulo
-                       comAntBracoE * 180 / comObrQuadE))  # Proporção comprimento ângulo
-
-        # Calcula o comprimento do cotovelo a mão direita
-        # Comprimento dado pelo Teorema de Pitágoras utilizando dos pontos do cotovelo e do pulso direito
-        comAntBracoD = sqrt(((maoD.y - cotoveloD.y) ** 2) + ((maoD.x - cotoveloD.x) ** 2))
-        # Ângulo cotovelo direito
-        # Ângulo dado pela relação comAntBracoD / comObrQuadD = angCotD / 180
-        # Na tentativa de compensar o ângulo frontal do braço, o valor calculado soma-se a 90 - ângulo frontal do braço
-        angCotD = (90 - angBraD +  # Compensação
-                   int(  # Inteiro
-                       comAntBracoD * 180 / comObrQuadD))  # Proporção comprimento ângulo
-
-        # Ângulo lateral perna direita
-        # De forma análoga ao ângulo lateral nos braços:
-        # Podemos obter a tangente do ângulo desejado, pois tem-se os catetos do triângulo retângulo.
-        # Utilizamos a função de arco tangente para obter o ângulo em radiano e por último a
-        # função que converte esse ângulo em graus.
-        # Como o movimento das pernas tem amplitude de 90º, usa somente 90 + o ângulo calculado
-        angPe = 90 + int(  # Inteiro
-            degrees(  # Converte radiano em graus
-                atan(  # Arco tangente (arc tg) (transformar a tg em ângulo [rad])
-                    (quadrilE.x - joelhoE.x) / (quadrilE.y - joelhoE.y))))  # Cateto oposto / adjacente (tg)
-
-        # Ângulo lateral perna esquerda
-        # De forma análoga ao ângulo lateral nos braços e similar ao mesmo ângulo na outra perna:
-        # Podemos obter a tangente do ângulo desejado, pois tem-se os catetos do triângulo retângulo.
-        # Utilizamos a função de arco tangente para obter o ângulo em radiano e por último a
-        # função que converte esse ângulo em graus.
-        # Como o movimento das pernas tem amplitude de 90º, usa somente 90 + o ângulo calculado
-        angPd = 90 + int(  # Inteiro
-            degrees(  # Converte radiano em graus
-                atan(  # Arco tangente (arc tg) (transformar a tg em ângulo [rad])
-                    (quadrilD.x - joelhoD.x) / (quadrilD.y - joelhoD.y))))  # Cateto oposto / adjacente (tg)
-
-        # Comprimento coxa Esquerda
-        comCoxE = sqrt((joelhoE.y - quadrilE.y) ** 2 + (joelhoE.x - quadrilE.x) ** 2)
-        # Ângulo frontal perna esquerda
-        angCoxE = int(  # Inteiro
-            comCoxE * 90 / (comObrQuadE / 5 * 4))
-
-        # Comprimento coxa Direita
-        comCoxD = sqrt((joelhoD.y - quadrilD.y) ** 2 + (joelhoD.x - quadrilD.x) ** 2)
-        # Ângulo frontal perna direita
-        angCoxD = (180 -  # Inversão do ângulo
-                   int(  # Inteiro
-                       comCoxD * 90 / (comObrQuadD / 5 * 4)))
-
-        # Comprimento canela Esquerda
-        comCanE = sqrt(((calcanharE.y - joelhoE.y) ** 2) + ((calcanharE.x - joelhoE.x) ** 2))
-        # Ângulo joelho esquerdo
-        angJe = (90 - angCoxE +  # Compensação
-                 int(  # Inteiro
-                     comCanE * 90 / (comObrQuadE / 5 * 4)))
-        # Limitador
-        if angJe > 90:
-            angJe = 90
-
-        # Comprimento canela Direita
-        comCanD = sqrt(((calcanharD.y - joelhoD.y) ** 2) + ((calcanharD.x - joelhoD.x) ** 2))
-        # Ângulo joelho direito
-        angJd = (90 - angCoxD +  # Compensação
-                 180 -  # Inversão do ângulo
-                 int(  # Inteiro
-                     comCanD * 90 / (comObrQuadD / 5 * 4)))
-        # Limitador
-        if angJd < 90:
-            angJd = 90
-
-        # Comunicação com esp
+        # ---- Comunicação com esp (protocolo idêntico ao original) ----
         if conecEsp == '1':
             esp.write(str(angBd).encode())
             esp.write('q'.encode())
@@ -331,21 +430,26 @@ while True:
             esp.write('d'.encode())
             esp.flush()
 
-        # Escrever na tela
-        """
-        cv2.putText(vid, f'D: {angBd:.1f}', (2, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, corTexto)
-        cv2.putText(vid, f'E: {angBraE:.1f}', (2, 105), cv2.FONT_HERSHEY_SIMPLEX, 1.5, corTexto)
-        cv2.putText(vid, f'D: {angBraD:.1f}', (2, 140), cv2.FONT_HERSHEY_SIMPLEX, 1.5, corTexto)
-        cv2.putText(vid, f'E: {angCotE:.1f}', (2, 175), cv2.FONT_HERSHEY_SIMPLEX, 1.5, corTexto)
-        cv2.putText(vid, f'D: {angCotD:.1f}', (2, 210), cv2.FONT_HERSHEY_SIMPLEX, 1.5, corTexto)"""
+        # ---- HUD: ângulo de cada servo ao lado do ponto correspondente ----
+        put_hud(vid, f'Ca:{angC}',              (nariz.x * w,     nariz.y * h))
+        put_hud(vid, f'OD:{angBd}',             (ombroD.x * w,    ombroD.y * h))
+        put_hud(vid, f'CD:{angBraD}',           (ombroD.x * w,    ombroD.y * h), offset=(8, 8))
+        put_hud(vid, f'OE:{angBe}',             (ombroE.x * w,    ombroE.y * h))
+        put_hud(vid, f'CE:{angBraE}',           (ombroE.x * w,    ombroE.y * h), offset=(8, 8))
+        put_hud(vid, f'AD:{angCotD}',           (cotoveloD.x * w, cotoveloD.y * h))
+        put_hud(vid, f'AE:{angCotE}',           (cotoveloE.x * w, cotoveloE.y * h))
+        put_hud(vid, f'LD:{angPd}',             (quadrilD.x * w,  quadrilD.y * h))
+        put_hud(vid, f'FD:{angCoxD}',           (quadrilD.x * w,  quadrilD.y * h), offset=(8, 8))
+        put_hud(vid, f'LE:{angPe}',             (quadrilE.x * w,  quadrilE.y * h))
+        put_hud(vid, f'FE:{angCoxE}',           (quadrilE.x * w,  quadrilE.y * h), offset=(8, 8))
+        put_hud(vid, f'JD:{angJd}',             (joelhoD.x * w,   joelhoD.y * h))
+        put_hud(vid, f'JE:{angJe}',             (joelhoE.x * w,   joelhoE.y * h))
 
-    cv2.imshow('video', vid)  # Abrir janela de vídeo
-    vid = cv2.flip(vid, 1)  # Espelhar vídeo
+    cv2.imshow('video', vid)
+    vid = cv2.flip(vid, 1)
 
-    # 'q' Para sair do loop
     if cv2.waitKey(1) == ord('q'):
         break
 
-# Limpeza de cache
 video.release()
 cv2.destroyAllWindows()
