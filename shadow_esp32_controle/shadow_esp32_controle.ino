@@ -5,8 +5,8 @@
 #include <WiFiAP.h>
 
 // Info rede Esp32
-IPAddress ip(192,168,8,222);
-IPAddress gateway(192,168,8,100);
+IPAddress ip(192,168,0,222);
+IPAddress gateway(192,168,0,100);
 IPAddress subnet(255,255,255,0);
 WiFiServer server(80);
 

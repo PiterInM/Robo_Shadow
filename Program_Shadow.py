@@ -44,10 +44,10 @@ ONE_EURO_DCUTOFF = 1.0
 # invert: True inverte o sentido do movimento (flipar se o servo mover ao contrário no teste)
 # lo/hi: clamp do valor final enviado ao servo
 SERVO_MAP = {
-    'OD': {'zero_deg': 175, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Ombro Direito (abd)
+    'OD': {'zero_deg': 175, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Ombro Direito (abd)
     'OE': {'zero_deg':  15, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Ombro Esquerdo (abd)
     'Ca': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Cabeça (yaw)
-    'CE': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Frontal Braço Esquerdo (flex)
+    'CE': {'zero_deg':  90, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Frontal Braço Esquerdo (flex)
     'CD': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Frontal Braço Direito (flex)
     'AE': {'zero_deg': 110, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Antebraço Esquerdo (cotovelo)
     'AD': {'zero_deg':  70, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Antebraço Direito (cotovelo)
@@ -115,6 +115,7 @@ def filter_landmark(name, xyz, t):
     return out
 
 
+
 # ============================================================
 # Geometria: body frame e ângulos
 # ============================================================
@@ -150,10 +151,21 @@ def angle_shoulder_abd(W, R, side):
     return math.atan2(v[0], -v[1])
 
 def angle_shoulder_flex(W, R, side):
-    """Flexão de ombro: 0=braço p/ baixo, +=braço p/ frente."""
+    """Flexão de ombro: 0=braço p/ baixo, +=braço p/ frente.
+
+    Usa asin(v_z / |v|) em vez de atan2(v_z, -v_y).
+    Motivo: quando o braço vai para o lado (abdução), v_y ≈ 0, tornando
+    atan2(v_z, -v_y) instável — qualquer ruído em v_z vira ângulo frontal
+    enorme (crosstalk lateral → frontal). Com asin(v_z/|v|), o ângulo
+    frontal depende APENAS do componente z normalizado do braço, sem
+    acoplamento com o movimento lateral.
+    """
     s, e = f'SHOULDER_{side}', f'ELBOW_{side}'
     v = to_body(R, W[e] - W[s])
-    return math.atan2(v[2], -v[1])
+    n = np.linalg.norm(v)
+    if n < 1e-9:
+        return 0.0
+    return math.asin(float(np.clip(v[2] / n, -1.0, 1.0)))
 
 def angle_elbow(W, R, side):
     """Flexão de cotovelo: 0=braço reto, pi/2=dobrado 90°."""
@@ -379,17 +391,17 @@ while True:
                 last_servo[key] = val
             return last_servo[key]
 
-        # ---- ISOLADO PARA TESTE: só braço direito (OD, CD, AD) ativo ----
+        # ---- Ambos os braços ativos (OD/CD/AD + OE/CE/AE) ----
         # Ombro (abdução)
-        angBd = _compute('OD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_abd(W, Rmat, 'R'))
-        # angBe = _compute('OE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_abd(W, Rmat, 'L'))
+        angBd  = _compute('OD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_abd(W, Rmat, 'R'))
+        angBe  = _compute('OE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_abd(W, Rmat, 'L'))
         # Cabeça (yaw)
         # angC  = _compute('Ca', ['NOSE', 'SHOULDER_L', 'SHOULDER_R'], lambda: angle_head_yaw(W, Rmat))
         # Ombro (flexão frontal)
-        # angBraE = _compute('CE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_flex(W, Rmat, 'L'))
+        angBraE = _compute('CE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_flex(W, Rmat, 'L'))
         angBraD = _compute('CD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_flex(W, Rmat, 'R'))
         # Cotovelo
-        # angCotE = _compute('AE', ['SHOULDER_L', 'ELBOW_L', 'WRIST_L'], lambda: angle_elbow(W, Rmat, 'L'))
+        angCotE = _compute('AE', ['SHOULDER_L', 'ELBOW_L', 'WRIST_L'], lambda: angle_elbow(W, Rmat, 'L'))
         angCotD = _compute('AD', ['SHOULDER_R', 'ELBOW_R', 'WRIST_R'], lambda: angle_elbow(W, Rmat, 'R'))
         # Perna (abdução lateral)
         # angPe = _compute('LE', ['HIP_L', 'KNEE_L'], lambda: angle_hip_abd(W, Rmat, 'L'))
@@ -403,18 +415,17 @@ while True:
 
         # ---- Comunicação com esp (protocolo idêntico ao original) ----
         if conecEsp == '1':
-            # ---- ISOLADO PARA TESTE: braço direito usa ângulo calculado; os demais mandam o valor padrão (zero_deg) fixo pra não travar o firmware esperando dado ----
             esp.write(str(angBd).encode())
             esp.write('q'.encode())
-            esp.write(str(SERVO_MAP['OE']['zero_deg']).encode())  # OE parado no padrão
+            esp.write(str(angBe).encode())
             esp.write('w'.encode())
             esp.write(str(SERVO_MAP['Ca']['zero_deg']).encode())  # Ca parado no padrão
             esp.write('e'.encode())
-            esp.write(str(SERVO_MAP['CE']['zero_deg']).encode())  # CE parado no padrão
+            esp.write(str(angBraE).encode())
             esp.write('r'.encode())
             esp.write(str(angBraD).encode())
             esp.write('t'.encode())
-            esp.write(str(SERVO_MAP['AE']['zero_deg']).encode())  # AE parado no padrão
+            esp.write(str(angCotE).encode())
             esp.write('y'.encode())
             esp.write(str(angCotD).encode())
             esp.write('u'.encode())
@@ -433,14 +444,13 @@ while True:
             esp.flush()
 
         # ---- HUD: ângulo de cada servo ao lado do ponto correspondente ----
-        # ---- ISOLADO PARA TESTE: só mostra braço direito (OD, CD, AD) ----
         # put_hud(vid, f'Ca:{angC}',              (nariz.x * w,     nariz.y * h))
         put_hud(vid, f'OD:{angBd}',             (ombroD.x * w,    ombroD.y * h))
         put_hud(vid, f'CD:{angBraD}',           (ombroD.x * w,    ombroD.y * h), offset=(8, 8))
-        # put_hud(vid, f'OE:{angBe}',             (ombroE.x * w,    ombroE.y * h))
-        # put_hud(vid, f'CE:{angBraE}',           (ombroE.x * w,    ombroE.y * h), offset=(8, 8))
+        put_hud(vid, f'OE:{angBe}',             (ombroE.x * w,    ombroE.y * h))
+        put_hud(vid, f'CE:{angBraE}',           (ombroE.x * w,    ombroE.y * h), offset=(8, 8))
         put_hud(vid, f'AD:{angCotD}',           (cotoveloD.x * w, cotoveloD.y * h))
-        # put_hud(vid, f'AE:{angCotE}',           (cotoveloE.x * w, cotoveloE.y * h))
+        put_hud(vid, f'AE:{angCotE}',           (cotoveloE.x * w, cotoveloE.y * h))
         # put_hud(vid, f'LD:{angPd}',             (quadrilD.x * w,  quadrilD.y * h))
         # put_hud(vid, f'FD:{angCoxD}',           (quadrilD.x * w,  quadrilD.y * h), offset=(8, 8))
         # put_hud(vid, f'LE:{angPe}',             (quadrilE.x * w,  quadrilE.y * h))
