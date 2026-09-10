@@ -46,7 +46,7 @@ ONE_EURO_DCUTOFF = 1.0
 SERVO_MAP = {
     'OD': {'zero_deg': 175, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Ombro Direito (abd)
     'OE': {'zero_deg':  15, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Ombro Esquerdo (abd)
-    'Ca': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Cabeça (yaw)
+    'Ca': {'zero_deg':  90, 'scale': 2.0, 'invert': False, 'lo': 0, 'hi': 180},  # Cabeça (yaw)
     'CE': {'zero_deg':  90, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Frontal Braço Esquerdo (flex)
     'CD': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Frontal Braço Direito (flex)
     'AE': {'zero_deg': 110, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Antebraço Esquerdo (cotovelo)
@@ -396,7 +396,7 @@ while True:
         angBd  = _compute('OD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_abd(W, Rmat, 'R'))
         angBe  = _compute('OE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_abd(W, Rmat, 'L'))
         # Cabeça (yaw)
-        # angC  = _compute('Ca', ['NOSE', 'SHOULDER_L', 'SHOULDER_R'], lambda: angle_head_yaw(W, Rmat))
+        angC   = _compute('Ca', ['NOSE', 'SHOULDER_L', 'SHOULDER_R'], lambda: angle_head_yaw(W, Rmat))
         # Ombro (flexão frontal)
         angBraE = _compute('CE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_flex(W, Rmat, 'L'))
         angBraD = _compute('CD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_flex(W, Rmat, 'R'))
@@ -419,7 +419,7 @@ while True:
             esp.write('q'.encode())
             esp.write(str(angBe).encode())
             esp.write('w'.encode())
-            esp.write(str(SERVO_MAP['Ca']['zero_deg']).encode())  # Ca parado no padrão
+            esp.write(str(angC).encode())
             esp.write('e'.encode())
             esp.write(str(angBraE).encode())
             esp.write('r'.encode())
@@ -444,7 +444,7 @@ while True:
             esp.flush()
 
         # ---- HUD: ângulo de cada servo ao lado do ponto correspondente ----
-        # put_hud(vid, f'Ca:{angC}',              (nariz.x * w,     nariz.y * h))
+        put_hud(vid, f'Ca:{angC}',              (nariz.x * w,     nariz.y * h))
         put_hud(vid, f'OD:{angBd}',             (ombroD.x * w,    ombroD.y * h))
         put_hud(vid, f'CD:{angBraD}',           (ombroD.x * w,    ombroD.y * h), offset=(8, 8))
         put_hud(vid, f'OE:{angBe}',             (ombroE.x * w,    ombroE.y * h))
