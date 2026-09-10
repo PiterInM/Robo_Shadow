@@ -4,6 +4,7 @@ import mediapipe as mp
 import math
 import numpy as np
 import serial
+from serial.tools import list_ports
 
 # ============================================================
 # Configurações e constantes
@@ -270,27 +271,193 @@ def put_hud(img, text, xy, offset=(8, -4)):
 
 
 # ============================================================
-# Menu de conexão com ESP
+# Menu gráfico de conexão com ESP
 # ============================================================
 
-while True:
-    conecEsp = str(input('Deseja conectar com esp?\n'
-                         '\033[34m[ 1 ]\033[m - \033[34mSIM\033[m\n'
-                         '\033[34m[ 2 ]\033[m - \033[34mNÂO\033[m\n'
-                         '-> '))
-    if conecEsp in '1 2':
-        break
-    else:
-        print('\033[35mINVÁLIDO!\033[m Insira 1 ou 2\n')
+def menu_conexao_grafico():
+    """
+    Janela OpenCV para selecionar a porta serial do ESP32.
+    Lista todas as portas USB disponíveis com descrição.
+    Retorna (esp_obj_ou_None, '1' se conectado ou '2' se não).
+    """
+    WIN       = 'Robo Shadow - Conexao ESP32'
+    WIN_W     = 640
+    ITEM_H    = 54
+    ITEM_X    = 30
+    ITEM_W    = WIN_W - 60
+    START_Y   = 108
+    GAP       = 8
 
-if conecEsp == '1':
-    while True:
-        try:
-            esp = serial.Serial(porta, velocComunc)
-            print('Esp Conectado')
+    # Paleta de cores
+    COR_BG        = ( 18,  22,  30)
+    COR_TITULO    = (100, 210, 255)
+    COR_SUB       = (160, 160, 170)
+    COR_PORTA_BG  = ( 32,  42,  58)
+    COR_PORTA_HV  = ( 50,  95, 175)
+    COR_NOESP_BG  = ( 48,  28,  28)
+    COR_NOESP_HV  = (110,  45,  45)
+    COR_NOESP_TX  = (210, 110, 110)
+    COR_REF_BG    = ( 38,  38,  52)
+    COR_REF_HV    = ( 60,  60,  88)
+    COR_OK        = ( 40, 180,  80)
+    COR_ERR       = (180,  50,  50)
+    COR_BRANCO    = (230, 230, 230)
+    COR_CINZA     = (130, 130, 140)
+    COR_BORDA     = ( 70,  85, 110)
+
+    state = {
+        'hover':    -1,
+        'msg':      'Clique em uma porta para conectar',
+        'msg_cor':  COR_SUB,
+        'done':     False,
+        'esp':      None,
+        'conecEsp': '2',
+    }
+    def _get_portas_usb():
+        """Retorna apenas portas com dispositivo USB real conectado (filtra ttyS* sem hwid)."""
+        return [p for p in list_ports.comports() if 'USB' in (p.hwid or '')]
+
+    portas_ref = [_get_portas_usb()]
+
+    def _rects(portas):
+        """Retorna lista de (x1,y1,x2,y2,tag) para todos os itens clicáveis."""
+        r = []
+        for i, p in enumerate(portas):
+            y = START_Y + i * (ITEM_H + GAP)
+            r.append((ITEM_X, y, ITEM_X + ITEM_W, y + ITEM_H, p.device))
+        base_y = START_Y + len(portas) * (ITEM_H + GAP) + 6
+        r.append((ITEM_X, base_y, ITEM_X + ITEM_W, base_y + ITEM_H, '__NO_ESP__'))
+        ref_y = base_y + ITEM_H + GAP
+        r.append((ITEM_X, ref_y, ITEM_X + ITEM_W, ref_y + 36, '__REFRESH__'))
+        return r
+
+    def _draw(portas, hover, msg, msg_cor):
+        n = len(portas)
+        rects = _rects(portas)
+        h = rects[-1][3] + 50
+        img = np.full((h, WIN_W, 3), COR_BG, dtype=np.uint8)
+
+        # Cabeçalho
+        cv2.putText(img, 'Robo Shadow', (WIN_W // 2 - 108, 38),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.05, COR_TITULO, 2, cv2.LINE_AA)
+        cv2.putText(img, 'Selecione a porta serial do ESP32',
+                    (WIN_W // 2 - 160, 64),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, COR_SUB, 1, cv2.LINE_AA)
+        cv2.line(img, (ITEM_X, 78), (WIN_W - ITEM_X, 78), (50, 60, 80), 1)
+
+        if not portas:
+            cv2.putText(img, 'Nenhuma porta USB encontrada',
+                        (ITEM_X, START_Y + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, COR_ERR, 1, cv2.LINE_AA)
+
+        # Botões de porta
+        for i, p in enumerate(portas):
+            x1, y1, x2, y2, _ = rects[i]
+            bg = COR_PORTA_HV if hover == i else COR_PORTA_BG
+            cv2.rectangle(img, (x1, y1), (x2, y2), bg, -1)
+            cv2.rectangle(img, (x1, y1), (x2, y2), COR_BORDA, 1)
+            cv2.putText(img, p.device, (x1 + 14, y1 + 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, COR_TITULO, 1, cv2.LINE_AA)
+            desc = (p.description or '')[:58]
+            cv2.putText(img, desc, (x1 + 14, y1 + 42),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, COR_CINZA, 1, cv2.LINE_AA)
+
+        # Botão Sem ESP
+        idx_ne = n
+        x1, y1, x2, y2, _ = rects[idx_ne]
+        bg = COR_NOESP_HV if hover == idx_ne else COR_NOESP_BG
+        cv2.rectangle(img, (x1, y1), (x2, y2), bg, -1)
+        cv2.rectangle(img, (x1, y1), (x2, y2), (90, 55, 55), 1)
+        cv2.putText(img, 'Continuar sem ESP', (x1 + 14, y1 + 32),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, COR_NOESP_TX, 1, cv2.LINE_AA)
+
+        # Botão Refresh
+        idx_rf = n + 1
+        x1, y1, x2, y2, _ = rects[idx_rf]
+        bg = COR_REF_HV if hover == idx_rf else COR_REF_BG
+        cv2.rectangle(img, (x1, y1), (x2, y2), bg, -1)
+        cv2.rectangle(img, (x1, y1), (x2, y2), (70, 70, 100), 1)
+        cv2.putText(img, 'Atualizar lista de portas', (x1 + 14, y1 + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, COR_CINZA, 1, cv2.LINE_AA)
+
+        # Mensagem de status
+        cv2.putText(img, msg, (ITEM_X, h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, msg_cor, 1, cv2.LINE_AA)
+
+        return img, rects
+
+
+    def mouse_cb(event, mx, my, flags, param):
+        portas = portas_ref[0]
+        rects  = _rects(portas)
+
+        # Detecta hover
+        hover = -1
+        for i, (x1, y1, x2, y2, _) in enumerate(rects):
+            if x1 <= mx <= x2 and y1 <= my <= y2:
+                hover = i
+                break
+        state['hover'] = hover
+
+        if event != cv2.EVENT_LBUTTONDOWN or hover < 0:
+            return
+
+        _, _, _, _, tag = rects[hover]
+
+        if tag == '__REFRESH__':
+            portas_ref[0] = _get_portas_usb()
+            n = len(portas_ref[0])
+            state['msg']    = f'{n} porta(s) encontrada(s)'
+            state['msg_cor'] = COR_SUB
+
+        elif tag == '__NO_ESP__':
+            state['conecEsp'] = '2'
+            state['done']     = True
+
+        else:
+            # Apenas marca a porta — a conexão é feita no loop principal.
+            # Não chamar imshow/waitKey aqui: o Qt não permite dentro de callbacks.
+            state['connecting'] = tag
+            state['msg']    = f'Conectando em {tag}...'
+            state['msg_cor'] = COR_SUB
+
+    # Renderiza o primeiro frame ANTES de registrar o mouse callback.
+    # O Qt só cria a janela de fato após o primeiro imshow + waitKey.
+    _img0, _ = _draw(portas_ref[0], -1, state['msg'], state['msg_cor'])
+    cv2.imshow(WIN, _img0)
+    cv2.waitKey(1)
+
+    cv2.setMouseCallback(WIN, mouse_cb)
+
+    while not state['done']:
+        # Conexão serial feita aqui (fora do callback) para poder usar imshow/waitKey.
+        if state.get('connecting'):
+            tag = state.pop('connecting')
+            try:
+                state['esp']      = serial.Serial(tag, velocComunc, timeout=2)
+                state['conecEsp'] = '1'
+                state['msg']      = f'Conectado em {tag}!'
+                state['msg_cor']  = COR_OK
+                portas = portas_ref[0]
+                img, _ = _draw(portas, state['hover'], state['msg'], state['msg_cor'])
+                cv2.imshow(WIN, img)
+                cv2.waitKey(900)
+                state['done'] = True
+            except Exception as e:
+                state['msg']    = f'Erro: {str(e)[:65]}'
+                state['msg_cor'] = COR_ERR
+
+        portas = portas_ref[0]
+        img, _ = _draw(portas, state['hover'], state['msg'], state['msg_cor'])
+        cv2.imshow(WIN, img)
+        if cv2.waitKey(50) == 27:   # ESC = sem ESP
             break
-        except:
-            pass
+
+    cv2.destroyAllWindows()
+    return state['esp'], state['conecEsp']
+
+
+esp, conecEsp = menu_conexao_grafico()
 
 
 # ============================================================
