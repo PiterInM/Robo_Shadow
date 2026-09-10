@@ -78,9 +78,13 @@ void loop() {
     ultimoPrincipal = principal;
   }
 
-  // Ação momentânea: acena só no instante do toque
+  // Ação (D1): no modo shadow = calibrar cintura, fora = acenar
   if (acaoBtn && !ultimoAcao) {
-    enviarAcao(3);
+    if (principal) {
+      enviarAcao(5);      // calibra a cintura
+    } else {
+      enviarAcao(3);      // acena
+    }
   }
   ultimoAcao = acaoBtn;
 

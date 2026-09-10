@@ -30,6 +30,7 @@ Servo FE; //Frontal Perna Esquerdo
 Servo FD; //Frontal Perna Direito
 Servo JE; //Joelho Esquerdo
 Servo JD; //Joelho Direito
+Servo Ci; //Cintura
 
 #define pOD 21 //Ombro Direito
 #define pOE 25 //Ombro Esquerdo
@@ -44,9 +45,10 @@ Servo JD; //Joelho Direito
 #define pFD 4  //Frontal Perna Direito
 #define pJE 12 //Joelho Esquerdo
 #define pJD 2  //Joelho Direito
-//2 4 12 14 18 21 22 23 25 26 27 32 33
+#define pCi 19 //Cintura
+//2 4 12 14 18 19 21 22 23 25 26 27 32 33
 
-String leitOd, leitOe, leitC, leitCD, leitCE, leitAE, leitAD, leitLE, leitLD, leitFE, leitFD, leitJE, leitJD;
+String leitOd, leitOe, leitC, leitCD, leitCE, leitAE, leitAD, leitLE, leitLD, leitFE, leitFD, leitJE, leitJD, leitCi;
 
 int acao = 0;
 
@@ -55,6 +57,7 @@ void Shadow();
 void Andar();
 void Acenar();
 void Sentar();
+void Calibrar();
 void onDadosRecebidos(const esp_now_recv_info *info, const uint8_t *dados, int len);
 
 void setup() {
@@ -85,7 +88,8 @@ void setup() {
   FE.attach(pFE); 
   FD.attach(pFD); 
   JE.attach(pJE); 
-  JD.attach(pJD); 
+  JD.attach(pJD);
+  Ci.attach(pCi);
 
   PosPadrao();
 }
@@ -121,6 +125,11 @@ void loop() {
   else if (acao == 4){
     Sentar();
   }
+
+  // Calibrar cintura (enviado pelo controle físico)
+  else if (acao == 5) {
+    Calibrar();
+  }
 }
 
 void PosPadrao() {
@@ -137,6 +146,7 @@ void PosPadrao() {
   FD.write(110);
   JE.write(70);
   JD.write(120);
+  Ci.write(90);
 }
 
 void onDadosRecebidos(const esp_now_recv_info *info, const uint8_t *dados, int len) {
@@ -145,6 +155,12 @@ void onDadosRecebidos(const esp_now_recv_info *info, const uint8_t *dados, int l
   memcpy(&msg, dados, sizeof(msg));
   acaoRecebidaENow = msg.acao;
   novoComandoENow = true;
+}
+
+void Calibrar() {
+  // Sinaliza ao Python para calibrar o zero da cintura e volta para shadow
+  Serial.println("CAL");
+  acao = 1;  // retorna imediatamente ao modo shadow
 }
 
 void Shadow() {
@@ -162,6 +178,7 @@ void Shadow() {
     leitFD = Serial.readStringUntil('a');
     leitJE = Serial.readStringUntil('s');
     leitJD = Serial.readStringUntil('d');
+    leitCi = Serial.readStringUntil('f');
 
     OD.write(leitOd.toInt());
     OE.write(leitOe.toInt());
@@ -176,6 +193,7 @@ void Shadow() {
     FD.write(leitFD.toInt());
     JE.write(leitJE.toInt());
     JD.write(leitJD.toInt());
+    Ci.write(leitCi.toInt());
   }
 }
 

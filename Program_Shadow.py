@@ -47,7 +47,7 @@ ONE_EURO_DCUTOFF = 1.0
 SERVO_MAP = {
     'OD': {'zero_deg': 175, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Ombro Direito (abd)
     'OE': {'zero_deg':  15, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Ombro Esquerdo (abd)
-    'Ca': {'zero_deg':  90, 'scale': 2.0, 'invert': False, 'lo': 0, 'hi': 180},  # Cabeça (yaw)
+    'Ca': {'zero_deg':  90, 'scale': 1.5, 'invert': False, 'lo': 0, 'hi': 180},  # Cabeça (yaw)
     'CE': {'zero_deg':  90, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Frontal Braço Esquerdo (flex)
     'CD': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Frontal Braço Direito (flex)
     'AE': {'zero_deg': 110, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Antebraço Esquerdo (cotovelo)
@@ -58,6 +58,7 @@ SERVO_MAP = {
     'FD': {'zero_deg': 110, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Frontal Perna Direito (flex)
     'JE': {'zero_deg':  70, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Joelho Esquerdo
     'JD': {'zero_deg': 120, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Joelho Direito
+    'Ci': {'zero_deg':  90, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Cintura (yaw torso)
 }
 
 # ============================================================
@@ -207,6 +208,34 @@ def angle_head_yaw(W, R):
     sh_mid_world = 0.5 * (W['SHOULDER_L'] + W['SHOULDER_R'])
     head = to_body(R, W['NOSE'] - sh_mid_world)
     return math.atan2(head[0], head[2])
+
+def angle_waist_yaw(W):
+    """Yaw da cintura: orientação absoluta dos ombros em relação à câmera.
+
+    Mede o ângulo do vetor ombro-a-ombro no plano horizontal (X, Z).
+    Isso permite que o robô vire a cintura quando o usuário gira o corpo todo,
+    ignorando o quadril (que giraria junto e anularia a diferença).
+    """
+    sh_vec = W['SHOULDER_L'] - W['SHOULDER_R']
+
+    # X: eixo horizontal da tela (positivo para a direita da imagem / esquerda da pessoa)
+    # Z: profundidade (positivo afastando da câmera)
+    sh_x = float(sh_vec[0])
+    sh_z = float(sh_vec[2])
+
+    # atan2(z, x): 0 quando paralelo à tela.
+    # Girar para um lado dá Z positivo, para o outro Z negativo.
+    return math.atan2(sh_z, sh_x)
+
+
+# Guarda último ângulo bruto da cintura para o HUD de debug
+_last_waist_deg = [0.0]
+# Offset de calibração da cintura (tecla 'c' redefine o zero)
+_waist_zero_rad = [0.0]
+# Offset de calibração da cabeça
+_head_zero_rad = [0.0]
+# Temporizador (frames) para a mensagem de feedback visual de calibração
+_calib_msg_frames = [0]
 
 
 def map_angle_to_servo(theta_rad, spec):
@@ -481,6 +510,8 @@ last_servo = {k: v['zero_deg'] for k, v in SERVO_MAP.items()}
 # ============================================================
 
 while True:
+    _raw_waist = [0.0]  # reset a cada frame; atualizado em _waist_fn se pose detectada
+    _raw_head = [0.0]
     conectado, vid = video.read()
     if not conectado:
         continue
@@ -563,13 +594,25 @@ while True:
         angBd  = _compute('OD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_abd(W, Rmat, 'R'))
         angBe  = _compute('OE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_abd(W, Rmat, 'L'))
         # Cabeça (yaw)
-        angC   = _compute('Ca', ['NOSE', 'SHOULDER_L', 'SHOULDER_R'], lambda: angle_head_yaw(W, Rmat))
+        _raw_head = [0.0]
+        def _head_fn():
+            v = angle_head_yaw(W, Rmat) - _head_zero_rad[0]
+            _raw_head[0] = math.degrees(v)
+            return v
+        angC   = _compute('Ca', ['NOSE', 'SHOULDER_L', 'SHOULDER_R'], _head_fn)
         # Ombro (flexão frontal)
         angBraE = _compute('CE', ['SHOULDER_L', 'ELBOW_L'], lambda: angle_shoulder_flex(W, Rmat, 'L'))
         angBraD = _compute('CD', ['SHOULDER_R', 'ELBOW_R'], lambda: angle_shoulder_flex(W, Rmat, 'R'))
         # Cotovelo
         angCotE = _compute('AE', ['SHOULDER_L', 'ELBOW_L', 'WRIST_L'], lambda: angle_elbow(W, Rmat, 'L'))
         angCotD = _compute('AD', ['SHOULDER_R', 'ELBOW_R', 'WRIST_R'], lambda: angle_elbow(W, Rmat, 'R'))
+        # Cintura (yaw torso) — subtrai offset de calibração; 'c' redefine o zero
+        _raw_waist = [0.0]
+        def _waist_fn():
+            v = angle_waist_yaw(W) - _waist_zero_rad[0]
+            _raw_waist[0] = math.degrees(v)
+            return v
+        angCi   = _compute('Ci', ['SHOULDER_L', 'SHOULDER_R', 'HIP_L', 'HIP_R'], _waist_fn)
         # Perna (abdução lateral)
         # angPe = _compute('LE', ['HIP_L', 'KNEE_L'], lambda: angle_hip_abd(W, Rmat, 'L'))
         # angPd = _compute('LD', ['HIP_R', 'KNEE_R'], lambda: angle_hip_abd(W, Rmat, 'R'))
@@ -582,6 +625,18 @@ while True:
 
         # ---- Comunicação com esp (protocolo idêntico ao original) ----
         if conecEsp == '1':
+            # Checa se o ESP32 enviou algum comando (ex: calibração pelo controle)
+            if esp.in_waiting > 0:
+                try:
+                    linha = esp.readline().decode('utf-8', errors='ignore').strip()
+                    if "CAL" in linha:
+                        _waist_zero_rad[0] += _raw_waist[0] * (math.pi / 180.0)
+                        _head_zero_rad[0] += _raw_head[0] * (math.pi / 180.0)
+                        _calib_msg_frames[0] = 30
+                        print(f'Calibrado! Cintura zero={math.degrees(_waist_zero_rad[0]):.1f}, Cabeça zero={math.degrees(_head_zero_rad[0]):.1f}')
+                except:
+                    pass
+
             esp.write(str(angBd).encode())
             esp.write('q'.encode())
             esp.write(str(angBe).encode())
@@ -608,16 +663,30 @@ while True:
             esp.write('s'.encode())
             esp.write(str(SERVO_MAP['JD']['zero_deg']).encode())  # JD parado no padrão
             esp.write('d'.encode())
+            esp.write(str(angCi).encode())
+            esp.write('f'.encode())
             esp.flush()
 
         # ---- HUD: ângulo de cada servo ao lado do ponto correspondente ----
         put_hud(vid, f'Ca:{angC}',              (nariz.x * w,     nariz.y * h))
+        put_hud(vid, f'({_raw_head[0]:.1f}g)',  (nariz.x * w,     nariz.y * h), offset=(8, 12))
         put_hud(vid, f'OD:{angBd}',             (ombroD.x * w,    ombroD.y * h))
         put_hud(vid, f'CD:{angBraD}',           (ombroD.x * w,    ombroD.y * h), offset=(8, 8))
         put_hud(vid, f'OE:{angBe}',             (ombroE.x * w,    ombroE.y * h))
         put_hud(vid, f'CE:{angBraE}',           (ombroE.x * w,    ombroE.y * h), offset=(8, 8))
         put_hud(vid, f'AD:{angCotD}',           (cotoveloD.x * w, cotoveloD.y * h))
         put_hud(vid, f'AE:{angCotE}',           (cotoveloE.x * w, cotoveloE.y * h))
+        cintX = (quadrilD.x + quadrilE.x) * 0.5 * w
+        cintY = (quadrilD.y + quadrilE.y) * 0.5 * h
+        put_hud(vid, f'Ci:{angCi}',             (cintX, cintY))
+        put_hud(vid, f'({_raw_waist[0]:.1f}g)', (cintX, cintY), offset=(8, 12))
+        # Dica de calibração no canto superior esquerdo
+        put_hud(vid, '[C] calibrar eixos de giro', (4, 4), offset=(0, 12))
+
+        # Feedback visual temporário de calibração
+        if _calib_msg_frames[0] > 0:
+            cv2.putText(vid, "CALIBRADO!", (int(w/2) - 100, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+            _calib_msg_frames[0] -= 1
         # put_hud(vid, f'LD:{angPd}',             (quadrilD.x * w,  quadrilD.y * h))
         # put_hud(vid, f'FD:{angCoxD}',           (quadrilD.x * w,  quadrilD.y * h), offset=(8, 8))
         # put_hud(vid, f'LE:{angPe}',             (quadrilE.x * w,  quadrilE.y * h))
@@ -628,8 +697,16 @@ while True:
     cv2.imshow('video', vid)
     vid = cv2.flip(vid, 1)
 
-    if cv2.waitKey(1) == ord('q'):
+    key = cv2.waitKey(1)
+    if key == ord('q'):
         break
+    elif key == ord('c'):
+        # Calibrar zero da cintura e cabeça: acumula o ângulo atual como novo offset
+        _waist_zero_rad[0] += _raw_waist[0] * (math.pi / 180.0)
+        _head_zero_rad[0] += _raw_head[0] * (math.pi / 180.0)
+        _calib_msg_frames[0] = 30
+        print(f'Calibrado! Cintura zero={math.degrees(_waist_zero_rad[0]):.1f}, Cabeça zero={math.degrees(_head_zero_rad[0]):.1f}')
+
 
 video.release()
 cv2.destroyAllWindows()
