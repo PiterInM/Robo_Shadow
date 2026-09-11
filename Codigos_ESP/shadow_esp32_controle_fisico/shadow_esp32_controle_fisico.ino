@@ -51,6 +51,7 @@ Servo Ci; //Cintura
 String leitOd, leitOe, leitC, leitCD, leitCE, leitAE, leitAD, leitLE, leitLD, leitFE, leitFD, leitJE, leitJD, leitCi;
 
 int acao = 0;
+bool isSeated = false; // Controle de estado para saber se o robô já está sentado
 
 void PosPadrao();
 void Shadow();
@@ -133,6 +134,8 @@ void loop() {
 }
 
 void PosPadrao() {
+  isSeated = false; // Se voltou para a pose padrão, não está mais sentado
+  
   OD.write(175);
   OE.write(15);
   Ca.write(90);
@@ -198,51 +201,146 @@ void Shadow() {
 }
 
 void Andar() {
-  int d = 130;
-    OD.write(160); //180
-    OE.write(20);
-    JE.write(60);
-    JD.write(130);
-    for (int c = 50; c < 130; c++){
-      FE.write(c);
-      FD.write(c);
-      CD.write(d);
-      CE.write(d);
-      if (c > 90) AE.write(c + 5);
-      if (c < 90) AD.write(c + 5);
-      d--;
-      delay(10);
+  // Posição base dos braços para andar (ligeiramente abertos)
+  OD.write(160);
+  OE.write(20);
+
+  // Parâmetros da caminhada
+  float ampPerna = 35.0;     // Amplitude do passo (frente/trás)
+  float ampBraco = 40.0;     // Amplitude do balanço dos braços
+  float maxJoelho = 35.0;    // O quanto o joelho dobra ao dar o passo
+  float vel = 0.15;          // Velocidade (aumentada para passos mais rápidos)
+  
+  float t = 0.0;
+  
+  // Fica andando infinitamente até receber um novo comando
+  while (true) {
+    // Sai imediatamente do laço de caminhada se o usuário apertar outro botão
+    if (novoComandoENow) {
+      break; 
     }
-    delay(20);
-    for (int i = 130; i > 50; i--){
-      FE.write(i);
-      FD.write(i);
-      CD.write(d);
-      CE.write(d);
-      if (i > 90) AE.write(i);
-      if (i < 90) AD.write(i);
-      d++;
-      delay(10);
+
+    // A matemática da caminhada humana baseada em senoides:
+    // t = 0: perna esq no meio passando pra frente, perna dir no meio passando pra trás
+    // t = pi/2: perna esq totalmente na frente (pisou), perna dir totalmente atrás
+    
+    float oscEsq = sin(t);
+    float oscDir = sin(t + PI); // Fase oposta
+
+    // ---- PERNAS (Frontal) ----
+    // FE base 70 (menor = frente). FD base 110 (maior = frente).
+    FE.write(70 - (oscEsq * ampPerna));
+    FD.write(110 + (oscDir * ampPerna));
+
+    // ---- JOELHOS ----
+    // O joelho só dobra durante a fase de "balanço" (quando a perna está indo pra frente).
+    // Matematicamente, isso ocorre quando a derivada da posição é positiva (cos(t) > 0).
+    float dobraEsq = (cos(t) > 0) ? cos(t) * maxJoelho : 0;
+    float dobraDir = (cos(t + PI) > 0) ? cos(t + PI) * maxJoelho : 0;
+    
+    // JE base 70 (menor = dobra). JD base 120 (maior = dobra).
+    JE.write(70 - dobraEsq);
+    JD.write(120 + dobraDir);
+
+    // ---- BRAÇOS (Frontal) ----
+    // O braço balança na direção OPOSTA à perna.
+    // CE base 90 (menor = frente). CD base 90 (maior = frente).
+    CE.write(90 - (oscDir * ampBraco));
+    CD.write(90 + (oscEsq * ampBraco));
+
+    // ---- COTOVELOS ----
+    // Mantém levemente dobrados e balançam sutilmente com o movimento
+    AE.write(110 - 20 + (oscDir * 10)); // AE base 110 (menor = dobra)
+    AD.write(70 + 20 - (oscEsq * 10));  // AD base 70 (maior = dobra)
+
+    // ---- CINTURA ----
+    // Gira levemente para compensar o passo e parecer natural
+    // Quando perna esq tá na frente (oscEsq=1), cintura gira pra direita pra compensar
+    Ci.write(90 - (oscEsq * 15));
+
+    t += vel;
+    if (t >= 2 * PI) {
+      t -= 2 * PI; // Reseta o ciclo para evitar perda de precisão matemática ao longo das horas
     }
+
+    delay(10); // Menor delay para movimentos mais ágeis
+  }
 }
 
 void Acenar() {
+  // Posição de preparação
   OE.write(20);
-    for (int d = 0; d < 3; d++){
-      for (int c = 60; c < 170; c++){
-        OD.write(c);
-        delay(15);
-      }
-      delay(40);
-      for (int i = 170; i > 60; i--){
-        OD.write(i);
-        delay(15);
-      }
-    }
-    acao = 0;
+  
+  // Levanta o braço direito lateralmente de forma suave e orgânica
+  // OD vai de 175 (braço solto) para 70 (braço médio)
+  for(float p = 0; p <= 1.0; p += 0.03) {
+    if (novoComandoENow) return; // Fuga imediata
+    
+    // Curva de suavização (ease-in-out) para não dar soco nos motores
+    float smooth_p = p * p * (3.0 - 2.0 * p); 
+    
+    OD.write(175 - (105 * smooth_p));
+    delay(15);
+  }
+  
+  float t = 0.0;
+  float vel = 0.25; // Velocidade do abano (rápido e animado)
+  
+  // Abanar a mão (5 ciclos completos)
+  while (t < 5 * 2 * PI) {
+    if (novoComandoENow) return; // Fuga imediata
+    
+    float osc = sin(t);
+    
+    // O abano ocorre oscilando o ombro em torno da posição alta (70)
+    OD.write(70 + (osc * 20)); // Sobe e desce +- 20 graus
+    
+    // A cabeça balança de leve acompanhando a mão (dá muita personalidade)
+    Ca.write(90 + (osc * 15)); 
+    
+    t += vel;
+    delay(15);
+  }
+  
+  // Retorna a cabeça pro centro
+  Ca.write(90);
+  
+  // Abaixa o braço suavemente
+  for(float p = 1.0; p >= 0.0; p -= 0.03) {
+    if (novoComandoENow) return;
+    float smooth_p = p * p * (3.0 - 2.0 * p); 
+    OD.write(175 - (105 * smooth_p));
+    delay(15);
+  }
+  
+  PosPadrao();
+  acao = 0;
 }
 
 void Sentar() {
+  // Se ainda não estiver sentado, faz a transição suave
+  if (!isSeated) {
+    // Animando apenas as pernas e joelhos, que são os únicos que mudam na pose de sentar
+    for(float p = 0; p <= 1.0; p += 0.02) {
+      if (novoComandoENow) return; // Fuga imediata
+      
+      float smooth_p = p * p * (3.0 - 2.0 * p); 
+      
+      // FE vai de 70 para 0
+      FE.write(70 - (70 * smooth_p));
+      // FD vai de 110 para 180
+      FD.write(110 + (70 * smooth_p));
+      // JE vai de 70 para 90
+      JE.write(70 + (20 * smooth_p));
+      // JD vai de 120 para 90
+      JD.write(120 - (30 * smooth_p));
+      
+      delay(15);
+    }
+    isSeated = true; // Marca que terminou de sentar
+  }
+  
+  // Mantém a posição
   OD.write(175);
   OE.write(15);
   Ca.write(90);
@@ -252,6 +350,8 @@ void Sentar() {
   AD.write(70);
   LE.write(95);
   LD.write(85);
+  
+  // Garantia da posição final das pernas
   FE.write(0);
   FD.write(180);
   JE.write(90);

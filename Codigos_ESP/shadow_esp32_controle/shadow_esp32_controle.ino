@@ -48,6 +48,7 @@ Servo Ci; //Cintura
 String leitOd, leitOe, leitC, leitCD, leitCE, leitAE, leitAD, leitLE, leitLD, leitFE, leitFD, leitJE, leitJD, leitCi;
 
 int acao = 0;
+bool isSeated = false; // Controle de estado para saber se o robô já está sentado
 
 void PosPadrao();
 void Shadow();
@@ -145,6 +146,8 @@ void loop() {
 }
 
 void PosPadrao() {
+  isSeated = false; // Se voltou para a pose padrão, não está mais sentado
+  
   OD.write(175);
   OE.write(15);
   Ca.write(90);
@@ -196,51 +199,107 @@ void Shadow() {
 }
 
 void Andar() {
-  int d = 130;
-    OD.write(160); //180
-    OE.write(20);
-    JE.write(60);
-    JD.write(130);
-    for (int c = 50; c < 130; c++){
-      FE.write(c);
-      FD.write(c);
-      CD.write(d);
-      CE.write(d);
-      if (c > 90) AE.write(c + 5);
-      if (c < 90) AD.write(c + 5);
-      d--;
-      delay(10);
-    }
-    delay(20);
-    for (int i = 130; i > 50; i--){
-      FE.write(i);
-      FD.write(i);
-      CD.write(d);
-      CE.write(d);
-      if (i > 90) AE.write(i);
-      if (i < 90) AD.write(i);
-      d++;
-      delay(10);
-    }
+  // Posição base dos braços para andar (ligeiramente abertos)
+  OD.write(160);
+  OE.write(20);
+
+  // Parâmetros da caminhada
+  float ampPerna = 35.0;     // Amplitude do passo (frente/trás)
+  float ampBraco = 40.0;     // Amplitude do balanço dos braços
+  float maxJoelho = 35.0;    // O quanto o joelho dobra ao dar o passo
+  float vel = 0.15;          // Velocidade
+  
+  // Faz um ciclo completo de caminhada e retorna para que o loop() possa verificar o WiFi
+  for (float t = 0.0; t < 2 * PI; t += vel) {
+    float oscEsq = sin(t);
+    float oscDir = sin(t + PI); // Fase oposta
+
+    // ---- PERNAS (Frontal) ----
+    FE.write(70 - (oscEsq * ampPerna));
+    FD.write(110 + (oscDir * ampPerna));
+
+    // ---- JOELHOS ----
+    float dobraEsq = (cos(t) > 0) ? cos(t) * maxJoelho : 0;
+    float dobraDir = (cos(t + PI) > 0) ? cos(t + PI) * maxJoelho : 0;
+    
+    JE.write(70 - dobraEsq);
+    JD.write(120 + dobraDir);
+
+    // ---- BRAÇOS (Frontal) ----
+    CE.write(90 - (oscDir * ampBraco));
+    CD.write(90 + (oscEsq * ampBraco));
+
+    // ---- COTOVELOS ----
+    AE.write(110 - 20 + (oscDir * 10));
+    AD.write(70 + 20 - (oscEsq * 10));
+
+    // ---- CINTURA ----
+    Ci.write(90 - (oscEsq * 15));
+
+    delay(10);
+  }
 }
 
 void Acenar() {
+  // Posição de preparação
   OE.write(20);
-    for (int d = 0; d < 3; d++){
-      for (int c = 60; c < 170; c++){
-        OD.write(c);
-        delay(15);
-      }
-      delay(40);
-      for (int i = 170; i > 60; i--){
-        OD.write(i);
-        delay(15);
-      }
-    }
-    acao = 0;
+  
+  // Levanta o braço direito lateralmente de forma suave e orgânica
+  for(float p = 0; p <= 1.0; p += 0.03) {
+    float smooth_p = p * p * (3.0 - 2.0 * p); 
+    OD.write(175 - (105 * smooth_p));
+    delay(15);
+  }
+  
+  float t = 0.0;
+  float vel = 0.25; // Velocidade do abano
+  
+  // Abanar a mão (5 ciclos completos)
+  while (t < 5 * 2 * PI) {
+    float osc = sin(t);
+    
+    // O abano ocorre oscilando o ombro em torno da posição alta (70)
+    OD.write(70 + (osc * 20)); // Sobe e desce +- 20 graus
+    
+    // A cabeça balança de leve acompanhando a mão
+    Ca.write(90 + (osc * 15)); 
+    
+    t += vel;
+    delay(15);
+  }
+  
+  // Retorna a cabeça pro centro
+  Ca.write(90);
+  
+  // Abaixa o braço suavemente
+  for(float p = 1.0; p >= 0.0; p -= 0.03) {
+    float smooth_p = p * p * (3.0 - 2.0 * p); 
+    OD.write(175 - (105 * smooth_p));
+    delay(15);
+  }
+  
+  PosPadrao();
+  acao = 0;
 }
 
 void Sentar() {
+  // Se ainda não estiver sentado, faz a transição suave
+  if (!isSeated) {
+    // Animando apenas as pernas e joelhos
+    for(float p = 0; p <= 1.0; p += 0.02) {
+      float smooth_p = p * p * (3.0 - 2.0 * p); 
+      
+      FE.write(70 - (70 * smooth_p));
+      FD.write(110 + (70 * smooth_p));
+      JE.write(70 + (20 * smooth_p));
+      JD.write(120 - (30 * smooth_p));
+      
+      delay(15);
+    }
+    isSeated = true; // Marca que terminou de sentar
+  }
+  
+  // Mantém a posição
   OD.write(175);
   OE.write(15);
   Ca.write(90);
@@ -250,6 +309,8 @@ void Sentar() {
   AD.write(70);
   LE.write(95);
   LD.write(85);
+  
+  // Garantia da posição final das pernas
   FE.write(0);
   FD.write(180);
   JE.write(90);
