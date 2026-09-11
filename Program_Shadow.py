@@ -53,11 +53,11 @@ SERVO_MAP = {
     'AE': {'zero_deg': 110, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Antebraço Esquerdo (cotovelo)
     'AD': {'zero_deg':  70, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Antebraço Direito (cotovelo)
     'LE': {'zero_deg':  95, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Lateral Perna Esquerdo (abd)
-    'LD': {'zero_deg':  85, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Lateral Perna Direito (abd)
-    'FE': {'zero_deg':  70, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Frontal Perna Esquerdo (flex)
-    'FD': {'zero_deg': 110, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Frontal Perna Direito (flex)
-    'JE': {'zero_deg':  70, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Joelho Esquerdo
-    'JD': {'zero_deg': 120, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Joelho Direito
+    'LD': {'zero_deg':  85, 'scale': 1.0, 'invert': False,  'lo': 0, 'hi': 180},  # Lateral Perna Direito (abd)
+    'FE': {'zero_deg':  70, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Frontal Perna Esquerdo (flex)
+    'FD': {'zero_deg': 110, 'scale': 1.0, 'invert': False,  'lo': 0, 'hi': 180},  # Frontal Perna Direito (flex)
+    'JE': {'zero_deg':  70, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Joelho Esquerdo
+    'JD': {'zero_deg': 120, 'scale': 1.0, 'invert': False,  'lo': 0, 'hi': 180},  # Joelho Direito
     'Ci': {'zero_deg':  90, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Cintura (yaw torso)
 }
 
@@ -150,24 +150,25 @@ def angle_shoulder_abd(W, R, side):
     """Abdução de ombro: 0=braço p/ baixo, +=abdução."""
     s, e = f'SHOULDER_{side}', f'ELBOW_{side}'
     v = to_body(R, W[e] - W[s])
-    return math.atan2(v[0], -v[1])
+    n = np.linalg.norm(v)
+    if n < 1e-9: return 0.0
+    ang = math.asin(float(np.clip(v[0] / n, -1.0, 1.0)))
+    # Se o braço passou da linha do ombro (horizontal) e o movimento é mais lateral que frontal
+    if v[1] > 0 and abs(v[0]) >= abs(v[2]):
+        ang = math.copysign(math.pi, ang) - ang
+    return ang
 
 def angle_shoulder_flex(W, R, side):
-    """Flexão de ombro: 0=braço p/ baixo, +=braço p/ frente.
-
-    Usa asin(v_z / |v|) em vez de atan2(v_z, -v_y).
-    Motivo: quando o braço vai para o lado (abdução), v_y ≈ 0, tornando
-    atan2(v_z, -v_y) instável — qualquer ruído em v_z vira ângulo frontal
-    enorme (crosstalk lateral → frontal). Com asin(v_z/|v|), o ângulo
-    frontal depende APENAS do componente z normalizado do braço, sem
-    acoplamento com o movimento lateral.
-    """
+    """Flexão de ombro: 0=braço p/ baixo, +=braço p/ frente."""
     s, e = f'SHOULDER_{side}', f'ELBOW_{side}'
     v = to_body(R, W[e] - W[s])
     n = np.linalg.norm(v)
-    if n < 1e-9:
-        return 0.0
-    return math.asin(float(np.clip(v[2] / n, -1.0, 1.0)))
+    if n < 1e-9: return 0.0
+    ang = math.asin(float(np.clip(v[2] / n, -1.0, 1.0)))
+    # Se o braço passou da linha do ombro e o movimento é mais frontal que lateral
+    if v[1] > 0 and abs(v[2]) >= abs(v[0]):
+        ang = math.copysign(math.pi, ang) - ang
+    return ang
 
 def angle_elbow(W, R, side):
     """Flexão de cotovelo: 0=braço reto, pi/2=dobrado 90°."""
@@ -184,24 +185,48 @@ def angle_hip_abd(W, R, side):
     """Abdução de quadril: 0=perna p/ baixo, +=perna p/ lado."""
     h, k = f'HIP_{side}', f'KNEE_{side}'
     v = to_body(R, W[k] - W[h])
-    return math.atan2(v[0], -v[1])
+    n = np.linalg.norm(v)
+    if n < 1e-9: return 0.0
+    ang = math.asin(float(np.clip(v[0] / n, -1.0, 1.0)))
+    if v[1] > 0 and abs(v[0]) >= abs(v[2]):
+        ang = math.copysign(math.pi, ang) - ang
+    return ang
 
 def angle_hip_flex(W, R, side):
     """Flexão de quadril: 0=perna p/ baixo, +=perna p/ frente."""
     h, k = f'HIP_{side}', f'KNEE_{side}'
     v = to_body(R, W[k] - W[h])
-    return math.atan2(v[2], -v[1])
+    n = np.linalg.norm(v)
+    if n < 1e-9: return 0.0
+    ang = math.asin(float(np.clip(v[2] / n, -1.0, 1.0)))
+    if v[1] > 0 and abs(v[2]) >= abs(v[0]):
+        ang = math.copysign(math.pi, ang) - ang
+    return ang
 
 def angle_knee(W, R, side):
-    """Flexão de joelho: 0=perna reta, pi/2=dobrada 90°."""
-    h, k, hl = f'HIP_{side}', f'KNEE_{side}', f'HEEL_{side}'
-    u = to_body(R, W[h] - W[k])
-    w = to_body(R, W[hl] - W[k])
-    nu, nw = np.linalg.norm(u), np.linalg.norm(w)
-    if nu < 1e-9 or nw < 1e-9:
-        return 0.0
-    c = np.clip(np.dot(u, w) / (nu * nw), -1.0, 1.0)
-    return math.pi - math.acos(c)
+    """Flexão de joelho: projetada no plano YZ (sagital) do corpo.
+    0=perna reta, +=dobrada para trás.
+    Isso ignora completamente ruídos laterais (X) e falsos positivos
+    quando a perna é levantada reta para frente.
+    """
+    h, k, hl = f'HIP_{side}', f'KNEE_{side}', f'ANKLE_{side}'
+    
+    # Vetores: coxa (Quadril -> Joelho) e canela (Joelho -> Tornozelo)
+    thigh = to_body(R, W[k] - W[h])
+    shin  = to_body(R, W[hl] - W[k])
+    
+    # Ângulos no plano de perfil (Z=frente, Y=cima)
+    ang_thigh = math.atan2(thigh[2], thigh[1])
+    ang_shin  = math.atan2(shin[2], shin[1])
+    
+    # A dobra do joelho é a diferença (canela dobra para -Z em relação à coxa)
+    diff = ang_shin - ang_thigh
+    
+    # Normalizar para o intervalo [-pi, pi]
+    while diff > math.pi: diff -= 2 * math.pi
+    while diff < -math.pi: diff += 2 * math.pi
+    
+    return max(0.0, float(diff))
 
 def angle_head_yaw(W, R):
     """Yaw da cabeça: 0=olhando p/ frente, +=virou p/ direita."""
@@ -271,6 +296,8 @@ def _init_lm_map(pose_mod):
             'KNEE_R':     pose_mod.PoseLandmark.RIGHT_KNEE,
             'HEEL_L':     pose_mod.PoseLandmark.LEFT_HEEL,
             'HEEL_R':     pose_mod.PoseLandmark.RIGHT_HEEL,
+            'ANKLE_L':    pose_mod.PoseLandmark.LEFT_ANKLE,
+            'ANKLE_R':    pose_mod.PoseLandmark.RIGHT_ANKLE,
         }
     return _LM_MAP
 
@@ -614,14 +641,14 @@ while True:
             return v
         angCi   = _compute('Ci', ['SHOULDER_L', 'SHOULDER_R', 'HIP_L', 'HIP_R'], _waist_fn)
         # Perna (abdução lateral)
-        # angPe = _compute('LE', ['HIP_L', 'KNEE_L'], lambda: angle_hip_abd(W, Rmat, 'L'))
-        # angPd = _compute('LD', ['HIP_R', 'KNEE_R'], lambda: angle_hip_abd(W, Rmat, 'R'))
+        angPe = _compute('LE', ['HIP_L', 'KNEE_L'], lambda: angle_hip_abd(W, Rmat, 'L'))
+        angPd = _compute('LD', ['HIP_R', 'KNEE_R'], lambda: angle_hip_abd(W, Rmat, 'R'))
         # Perna (flexão frontal)
-        # angCoxE = _compute('FE', ['HIP_L', 'KNEE_L'], lambda: angle_hip_flex(W, Rmat, 'L'))
-        # angCoxD = _compute('FD', ['HIP_R', 'KNEE_R'], lambda: angle_hip_flex(W, Rmat, 'R'))
+        angCoxE = _compute('FE', ['HIP_L', 'KNEE_L'], lambda: angle_hip_flex(W, Rmat, 'L'))
+        angCoxD = _compute('FD', ['HIP_R', 'KNEE_R'], lambda: angle_hip_flex(W, Rmat, 'R'))
         # Joelho
-        # angJe = _compute('JE', ['HIP_L', 'KNEE_L', 'HEEL_L'], lambda: angle_knee(W, Rmat, 'L'))
-        # angJd = _compute('JD', ['HIP_R', 'KNEE_R', 'HEEL_R'], lambda: angle_knee(W, Rmat, 'R'))
+        angJe = _compute('JE', ['HIP_L', 'KNEE_L', 'ANKLE_L'], lambda: angle_knee(W, Rmat, 'L'))
+        angJd = _compute('JD', ['HIP_R', 'KNEE_R', 'ANKLE_R'], lambda: angle_knee(W, Rmat, 'R'))
 
         # ---- Comunicação com esp (protocolo idêntico ao original) ----
         if conecEsp == '1':
@@ -651,17 +678,17 @@ while True:
             esp.write('y'.encode())
             esp.write(str(angCotD).encode())
             esp.write('u'.encode())
-            esp.write(str(SERVO_MAP['LE']['zero_deg']).encode())  # LE parado no padrão
+            esp.write(str(angPe).encode())
             esp.write('i'.encode())
-            esp.write(str(SERVO_MAP['LD']['zero_deg']).encode())  # LD parado no padrão
+            esp.write(str(angPd).encode())
             esp.write('o'.encode())
-            esp.write(str(SERVO_MAP['FE']['zero_deg']).encode())  # FE parado no padrão
+            esp.write(str(angCoxE).encode())
             esp.write('p'.encode())
-            esp.write(str(SERVO_MAP['FD']['zero_deg']).encode())  # FD parado no padrão
+            esp.write(str(angCoxD).encode())
             esp.write('a'.encode())
-            esp.write(str(SERVO_MAP['JE']['zero_deg']).encode())  # JE parado no padrão
+            esp.write(str(angJe).encode())
             esp.write('s'.encode())
-            esp.write(str(SERVO_MAP['JD']['zero_deg']).encode())  # JD parado no padrão
+            esp.write(str(angJd).encode())
             esp.write('d'.encode())
             esp.write(str(angCi).encode())
             esp.write('f'.encode())
@@ -687,12 +714,12 @@ while True:
         if _calib_msg_frames[0] > 0:
             cv2.putText(vid, "CALIBRADO!", (int(w/2) - 100, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
             _calib_msg_frames[0] -= 1
-        # put_hud(vid, f'LD:{angPd}',             (quadrilD.x * w,  quadrilD.y * h))
-        # put_hud(vid, f'FD:{angCoxD}',           (quadrilD.x * w,  quadrilD.y * h), offset=(8, 8))
-        # put_hud(vid, f'LE:{angPe}',             (quadrilE.x * w,  quadrilE.y * h))
-        # put_hud(vid, f'FE:{angCoxE}',           (quadrilE.x * w,  quadrilE.y * h), offset=(8, 8))
-        # put_hud(vid, f'JD:{angJd}',             (joelhoD.x * w,   joelhoD.y * h))
-        # put_hud(vid, f'JE:{angJe}',             (joelhoE.x * w,   joelhoE.y * h))
+        put_hud(vid, f'LD:{angPd}',             (quadrilD.x * w,  quadrilD.y * h))
+        put_hud(vid, f'FD:{angCoxD}',           (quadrilD.x * w,  quadrilD.y * h), offset=(8, 8))
+        put_hud(vid, f'LE:{angPe}',             (quadrilE.x * w,  quadrilE.y * h))
+        put_hud(vid, f'FE:{angCoxE}',           (quadrilE.x * w,  quadrilE.y * h), offset=(8, 8))
+        put_hud(vid, f'JD:{angJd}',             (joelhoD.x * w,   joelhoD.y * h))
+        put_hud(vid, f'JE:{angJe}',             (joelhoE.x * w,   joelhoE.y * h))
 
     cv2.imshow('video', vid)
     vid = cv2.flip(vid, 1)
