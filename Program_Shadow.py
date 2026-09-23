@@ -147,28 +147,44 @@ def to_body(R, v):
     return R.T @ v
 
 def angle_shoulder_abd(W, R, side):
-    """Abdução de ombro: 0=braço p/ baixo, +=abdução."""
+    """Abdução de ombro: 0=braço p/ baixo, +=abdução lateral.
+
+    Blend Quártico (x^4): blinda a abdução contra falsos positivos do eixo Z (frente/trás).
+    Se a câmera distorcer a profundidade (muito comum no MediaPipe quando o corpo está de lado),
+    o blend quártico ignora o Z e força o movimento lateral puro, permitindo passar da linha do ombro.
+    """
     s, e = f'SHOULDER_{side}', f'ELBOW_{side}'
     v = to_body(R, W[e] - W[s])
     n = np.linalg.norm(v)
     if n < 1e-9: return 0.0
-    ang = math.asin(float(np.clip(v[0] / n, -1.0, 1.0)))
-    # Se o braço passou da linha do ombro (horizontal) e o movimento é mais lateral que frontal
-    if v[1] > 0 and abs(v[0]) >= abs(v[2]):
-        ang = math.copysign(math.pi, ang) - ang
-    return ang
+    vx, vy, vz = float(v[0]), float(v[1]), float(v[2])
+    total_hz4 = (vx*vx)**2 + (vz*vz)**2
+    if total_hz4 < 1e-12: return 0.0
+    
+    lat_w = (vx*vx)**2 / total_hz4
+    ang_lat = math.atan2(vx, -vy)
+    ang_fro = math.asin(np.clip(vx / n, -1.0, 1.0))
+    
+    return lat_w * ang_lat + (1.0 - lat_w) * ang_fro
 
 def angle_shoulder_flex(W, R, side):
-    """Flexão de ombro: 0=braço p/ baixo, +=braço p/ frente."""
+    """Flexão de ombro: 0=braço p/ baixo, +=braço p/ frente.
+
+    Blend Quártico (x^4): força o isolamento da flexão.
+    """
     s, e = f'SHOULDER_{side}', f'ELBOW_{side}'
     v = to_body(R, W[e] - W[s])
     n = np.linalg.norm(v)
     if n < 1e-9: return 0.0
-    ang = math.asin(float(np.clip(v[2] / n, -1.0, 1.0)))
-    # Se o braço passou da linha do ombro e o movimento é mais frontal que lateral
-    if v[1] > 0 and abs(v[2]) >= abs(v[0]):
-        ang = math.copysign(math.pi, ang) - ang
-    return ang
+    vx, vy, vz = float(v[0]), float(v[1]), float(v[2])
+    total_hz4 = (vx*vx)**2 + (vz*vz)**2
+    if total_hz4 < 1e-12: return 0.0
+    
+    fro_w = (vz*vz)**2 / total_hz4
+    ang_fro = math.atan2(vz, -vy)
+    ang_lat = math.asin(np.clip(vz / n, -1.0, 1.0))
+    
+    return fro_w * ang_fro + (1.0 - fro_w) * ang_lat
 
 def angle_elbow(W, R, side):
     """Flexão de cotovelo: 0=braço reto, pi/2=dobrado 90°."""
@@ -182,26 +198,36 @@ def angle_elbow(W, R, side):
     return math.pi - math.acos(c)
 
 def angle_hip_abd(W, R, side):
-    """Abdução de quadril: 0=perna p/ baixo, +=perna p/ lado."""
+    """Abdução de quadril com blend quártico."""
     h, k = f'HIP_{side}', f'KNEE_{side}'
     v = to_body(R, W[k] - W[h])
     n = np.linalg.norm(v)
     if n < 1e-9: return 0.0
-    ang = math.asin(float(np.clip(v[0] / n, -1.0, 1.0)))
-    if v[1] > 0 and abs(v[0]) >= abs(v[2]):
-        ang = math.copysign(math.pi, ang) - ang
-    return ang
+    vx, vy, vz = float(v[0]), float(v[1]), float(v[2])
+    total_hz4 = (vx*vx)**2 + (vz*vz)**2
+    if total_hz4 < 1e-12: return 0.0
+    
+    lat_w = (vx*vx)**2 / total_hz4
+    ang_lat = math.atan2(vx, -vy)
+    ang_fro = math.asin(np.clip(vx / n, -1.0, 1.0))
+    
+    return lat_w * ang_lat + (1.0 - lat_w) * ang_fro
 
 def angle_hip_flex(W, R, side):
-    """Flexão de quadril: 0=perna p/ baixo, +=perna p/ frente."""
+    """Flexão de quadril com blend quártico."""
     h, k = f'HIP_{side}', f'KNEE_{side}'
     v = to_body(R, W[k] - W[h])
     n = np.linalg.norm(v)
     if n < 1e-9: return 0.0
-    ang = math.asin(float(np.clip(v[2] / n, -1.0, 1.0)))
-    if v[1] > 0 and abs(v[2]) >= abs(v[0]):
-        ang = math.copysign(math.pi, ang) - ang
-    return ang
+    vx, vy, vz = float(v[0]), float(v[1]), float(v[2])
+    total_hz4 = (vx*vx)**2 + (vz*vz)**2
+    if total_hz4 < 1e-12: return 0.0
+    
+    fro_w = (vz*vz)**2 / total_hz4
+    ang_fro = math.atan2(vz, -vy)
+    ang_lat = math.asin(np.clip(vz / n, -1.0, 1.0))
+    
+    return fro_w * ang_fro + (1.0 - fro_w) * ang_lat
 
 def angle_knee(W, R, side):
     """Flexão de joelho: projetada no plano YZ (sagital) do corpo.
