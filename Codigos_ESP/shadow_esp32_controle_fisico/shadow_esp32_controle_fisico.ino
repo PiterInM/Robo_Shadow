@@ -168,6 +168,10 @@ void Calibrar() {
 
 void Shadow() {
   if (Serial.available() > 0){
+    // Descarta frames acumulados no buffer; mantém apenas o mais recente.
+    // Um frame completo tem no máximo ~60 bytes (14 ângulos de 3 dígitos + delimitadores).
+    while (Serial.available() > 60) Serial.read();
+
     leitOd = Serial.readStringUntil('q');
     leitOe = Serial.readStringUntil('w');
     leitC  = Serial.readStringUntil('e');

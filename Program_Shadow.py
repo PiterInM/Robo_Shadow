@@ -664,34 +664,13 @@ while True:
                 except:
                     pass
 
-            esp.write(str(angBd).encode())
-            esp.write('q'.encode())
-            esp.write(str(angBe).encode())
-            esp.write('w'.encode())
-            esp.write(str(angC).encode())
-            esp.write('e'.encode())
-            esp.write(str(angBraE).encode())
-            esp.write('r'.encode())
-            esp.write(str(angBraD).encode())
-            esp.write('t'.encode())
-            esp.write(str(angCotE).encode())
-            esp.write('y'.encode())
-            esp.write(str(angCotD).encode())
-            esp.write('u'.encode())
-            esp.write(str(angPe).encode())
-            esp.write('i'.encode())
-            esp.write(str(angPd).encode())
-            esp.write('o'.encode())
-            esp.write(str(angCoxE).encode())
-            esp.write('p'.encode())
-            esp.write(str(angCoxD).encode())
-            esp.write('a'.encode())
-            esp.write(str(angJe).encode())
-            esp.write('s'.encode())
-            esp.write(str(angJd).encode())
-            esp.write('d'.encode())
-            esp.write(str(angCi).encode())
-            esp.write('f'.encode())
+            # Envia todos os 14 ângulos em uma única escrita para reduzir syscalls
+            pacote = (
+                f"{angBd}q{angBe}w{angC}e{angBraE}r{angBraD}t"
+                f"{angCotE}y{angCotD}u{angPe}i{angPd}o"
+                f"{angCoxE}p{angCoxD}a{angJe}s{angJd}d{angCi}f"
+            )
+            esp.write(pacote.encode())
             esp.flush()
 
         # ---- HUD: ângulo de cada servo ao lado do ponto correspondente ----
