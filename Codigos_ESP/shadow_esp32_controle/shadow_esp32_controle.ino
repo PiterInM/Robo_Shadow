@@ -245,17 +245,17 @@ void Acenar() {
   OE.write(20);
   
   // Levanta o braço direito lateralmente de forma suave e orgânica
-  for(float p = 0; p <= 1.0; p += 0.03) {
+  for(float p = 0; p <= 1.0; p += 0.015) {
     float smooth_p = p * p * (3.0 - 2.0 * p); 
     OD.write(175 - (105 * smooth_p));
-    delay(15);
+    delay(20);
   }
   
   float t = 0.0;
-  float vel = 0.25; // Velocidade do abano
+  float vel = 0.10; // Velocidade do abano mais lenta e suave
   
-  // Abanar a mão (5 ciclos completos)
-  while (t < 5 * 2 * PI) {
+  // Abanar a mão (4 ciclos completos)
+  while (t < 4 * 2 * PI) {
     float osc = sin(t);
     
     // O abano ocorre oscilando o ombro em torno da posição alta (70)
@@ -265,17 +265,17 @@ void Acenar() {
     Ca.write(90 + (osc * 15)); 
     
     t += vel;
-    delay(15);
+    delay(20);
   }
   
   // Retorna a cabeça pro centro
   Ca.write(90);
   
   // Abaixa o braço suavemente
-  for(float p = 1.0; p >= 0.0; p -= 0.03) {
+  for(float p = 1.0; p >= 0.0; p -= 0.015) {
     float smooth_p = p * p * (3.0 - 2.0 * p); 
     OD.write(175 - (105 * smooth_p));
-    delay(15);
+    delay(20);
   }
   
   PosPadrao();

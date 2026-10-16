@@ -1,18 +1,19 @@
-# Importação de bibliotecas OpenCV, MediaPipe, Math, NumPy e PySerial
+# Importação de bibliotecas OpenCV, MediaPipe, Math, NumPy e Socket UDP
 import cv2
 import mediapipe as mp
 import math
 import numpy as np
-import serial
-from serial.tools import list_ports
+import socket
+import threading
 
 # ============================================================
 # Configurações e constantes
 # ============================================================
 
-# Declaração porta do ESP32
-porta = '/dev/ttyUSB0'  # Coloque entre as aspas simples a porta serial do Esp32
-velocComunc = 115200  # Coloque aqui a velocidade da comunicação serial
+# ---- Configuração UDP ----
+ESP32_IP   = '192.168.4.1'   # IP padrão do Access Point do ESP32
+ESP32_PORT = 4210             # Porta UDP do ESP32
+PC_PORT    = 4211             # Porta local para receber respostas (ex: CAL)
 
 # Definindo cores
 corPontos = (0, 0, 255)
@@ -59,6 +60,8 @@ SERVO_MAP = {
     'JE': {'zero_deg':  70, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Joelho Esquerdo
     'JD': {'zero_deg': 120, 'scale': 1.0, 'invert': False,  'lo': 0, 'hi': 180},  # Joelho Direito
     'Ci': {'zero_deg':  90, 'scale': 1.0, 'invert': True, 'lo': 0, 'hi': 180},  # Cintura (yaw torso)
+    'TE': {'zero_deg':  90, 'scale': 1.0, 'invert': False, 'lo': 0, 'hi': 180},  # Tornozelo Esquerdo (flex)
+    'TD': {'zero_deg':  90, 'scale': 1.0, 'invert': True,  'lo': 0, 'hi': 180},  # Tornozelo Direito  (flex)
 }
 
 # ============================================================
@@ -254,6 +257,28 @@ def angle_knee(W, R, side):
     
     return max(0.0, float(diff))
 
+def angle_ankle(W, R, side):
+    """Flexão de tornozelo no plano sagital (YZ do corpo).
+    0 = pé alinhado com a canela (plantarflexão extrema).
+    Neutro (pé perpendicular à canela) ≈ pi/2 → retorna ~0 mapeado para servo 90.
+    Positivo = dorsiflexo (bico do pé levantado).
+    Negativo = plantarflexo (bico do pé abaixado).
+    """
+    k, a, hl = f'KNEE_{side}', f'ANKLE_{side}', f'HEEL_{side}'
+    shin = to_body(R, W[a]  - W[k])   # joelho → tornozelo
+    foot = to_body(R, W[hl] - W[a])   # tornozelo → calcanhar
+    ns, nf = np.linalg.norm(shin), np.linalg.norm(foot)
+    if ns < 1e-9 or nf < 1e-9:
+        return 0.0
+    # Ângulo entre os dois vetores no plano sagital
+    ang_shin = math.atan2(shin[2], -shin[1])  # direção da canela no plano YZ
+    ang_foot = math.atan2(foot[2], -foot[1])  # direção do pé no plano YZ
+    diff = ang_foot - ang_shin
+    while diff >  math.pi: diff -= 2 * math.pi
+    while diff < -math.pi: diff += 2 * math.pi
+    # Subtrai pi/2: quando o pé está perpendicular à canela (neutro), diff ≈ pi/2 → retorna 0
+    return float(diff) - math.pi / 2
+
 def angle_head_yaw(W, R):
     """Yaw da cabeça: 0=olhando p/ frente, +=virou p/ direita."""
     sh_mid_world = 0.5 * (W['SHOULDER_L'] + W['SHOULDER_R'])
@@ -358,124 +383,85 @@ def put_hud(img, text, xy, offset=(8, -4)):
 
 def menu_conexao_grafico():
     """
-    Janela OpenCV para selecionar a porta serial do ESP32.
-    Lista todas as portas USB disponíveis com descrição.
-    Retorna (esp_obj_ou_None, '1' se conectado ou '2' se não).
+    Janela OpenCV para configurar a conexão UDP com o ESP32.
+    Instrui o usuário a conectar o PC à rede Wi-Fi 'RoboShadow'
+    e testa o socket UDP antes de continuar.
+    Retorna (sock_ou_None, '1' se conectado ou '2' se não).
     """
-    WIN       = 'Robo Shadow - Conexao ESP32'
-    WIN_W     = 640
-    ITEM_H    = 54
-    ITEM_X    = 30
-    ITEM_W    = WIN_W - 60
-    START_Y   = 108
-    GAP       = 8
+    WIN   = 'Robo Shadow - Conexao ESP32'
+    WIN_W = 640
+    WIN_H = 360
 
-    # Paleta de cores
-    COR_BG        = ( 18,  22,  30)
-    COR_TITULO    = (100, 210, 255)
-    COR_SUB       = (160, 160, 170)
-    COR_PORTA_BG  = ( 32,  42,  58)
-    COR_PORTA_HV  = ( 50,  95, 175)
-    COR_NOESP_BG  = ( 48,  28,  28)
-    COR_NOESP_HV  = (110,  45,  45)
-    COR_NOESP_TX  = (210, 110, 110)
-    COR_REF_BG    = ( 38,  38,  52)
-    COR_REF_HV    = ( 60,  60,  88)
-    COR_OK        = ( 40, 180,  80)
-    COR_ERR       = (180,  50,  50)
-    COR_BRANCO    = (230, 230, 230)
-    COR_CINZA     = (130, 130, 140)
-    COR_BORDA     = ( 70,  85, 110)
+    COR_BG     = ( 18,  22,  30)
+    COR_TITULO = (100, 210, 255)
+    COR_SUB    = (160, 160, 170)
+    COR_OK     = ( 40, 180,  80)
+    COR_ERR    = (180,  50,  50)
+    COR_BTN_BG = ( 32,  42,  58)
+    COR_BTN_HV = ( 50,  95, 175)
+    COR_SKIP_BG= ( 48,  28,  28)
+    COR_SKIP_HV= (110,  45,  45)
+    COR_SKIP_TX= (210, 110, 110)
+    COR_BORDA  = ( 70,  85, 110)
+    COR_BRANCO = (230, 230, 230)
 
     state = {
         'hover':    -1,
-        'msg':      'Clique em uma porta para conectar',
+        'msg':      f'Conecte o PC à rede Wi-Fi "RoboShadow" (senha: shadow123)',
         'msg_cor':  COR_SUB,
         'done':     False,
-        'esp':      None,
+        'sock':     None,
         'conecEsp': '2',
     }
-    def _get_portas_usb():
-        """Retorna apenas portas com dispositivo USB real conectado (filtra ttyS* sem hwid)."""
-        return [p for p in list_ports.comports() if 'USB' in (p.hwid or '')]
 
-    portas_ref = [_get_portas_usb()]
+    BTN_CON  = (30,  220, 610, 275, '__CONNECT__')
+    BTN_SKIP = (30,  285, 610, 335, '__SKIP__')
+    RECTS = [BTN_CON, BTN_SKIP]
 
-    def _rects(portas):
-        """Retorna lista de (x1,y1,x2,y2,tag) para todos os itens clicáveis."""
-        r = []
-        for i, p in enumerate(portas):
-            y = START_Y + i * (ITEM_H + GAP)
-            r.append((ITEM_X, y, ITEM_X + ITEM_W, y + ITEM_H, p.device))
-        base_y = START_Y + len(portas) * (ITEM_H + GAP) + 6
-        r.append((ITEM_X, base_y, ITEM_X + ITEM_W, base_y + ITEM_H, '__NO_ESP__'))
-        ref_y = base_y + ITEM_H + GAP
-        r.append((ITEM_X, ref_y, ITEM_X + ITEM_W, ref_y + 36, '__REFRESH__'))
-        return r
+    def _draw(hover, msg, msg_cor):
+        img = np.full((WIN_H, WIN_W, 3), COR_BG, dtype=np.uint8)
 
-    def _draw(portas, hover, msg, msg_cor):
-        n = len(portas)
-        rects = _rects(portas)
-        h = rects[-1][3] + 50
-        img = np.full((h, WIN_W, 3), COR_BG, dtype=np.uint8)
-
-        # Cabeçalho
-        cv2.putText(img, 'Robo Shadow', (WIN_W // 2 - 108, 38),
+        cv2.putText(img, 'Robo Shadow', (WIN_W // 2 - 108, 45),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.05, COR_TITULO, 2, cv2.LINE_AA)
-        cv2.putText(img, 'Selecione a porta serial do ESP32',
-                    (WIN_W // 2 - 160, 64),
+        cv2.putText(img, 'Comunicacao sem fio via Wi-Fi UDP',
+                    (WIN_W // 2 - 165, 72),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.50, COR_SUB, 1, cv2.LINE_AA)
-        cv2.line(img, (ITEM_X, 78), (WIN_W - ITEM_X, 78), (50, 60, 80), 1)
+        cv2.line(img, (30, 86), (WIN_W - 30, 86), (50, 60, 80), 1)
 
-        if not portas:
-            cv2.putText(img, 'Nenhuma porta USB encontrada',
-                        (ITEM_X, START_Y + 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, COR_ERR, 1, cv2.LINE_AA)
+        # Instruções
+        instrs = [
+            f'1. No ESP32: grave o firmware e ligue o robô.',
+            f'2. No PC: conecte à rede Wi-Fi  "RoboShadow"  (senha: shadow123).',
+            f'3. Clique em "Conectar" para testar a conexão UDP.',
+            f'   ESP32 IP: {ESP32_IP}   Porta: {ESP32_PORT}',
+        ]
+        for i, txt in enumerate(instrs):
+            cv2.putText(img, txt, (36, 115 + i * 26),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, COR_BRANCO, 1, cv2.LINE_AA)
 
-        # Botões de porta
-        for i, p in enumerate(portas):
-            x1, y1, x2, y2, _ = rects[i]
-            bg = COR_PORTA_HV if hover == i else COR_PORTA_BG
-            cv2.rectangle(img, (x1, y1), (x2, y2), bg, -1)
-            cv2.rectangle(img, (x1, y1), (x2, y2), COR_BORDA, 1)
-            cv2.putText(img, p.device, (x1 + 14, y1 + 24),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, COR_TITULO, 1, cv2.LINE_AA)
-            desc = (p.description or '')[:58]
-            cv2.putText(img, desc, (x1 + 14, y1 + 42),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.36, COR_CINZA, 1, cv2.LINE_AA)
+        # Botão Conectar
+        x1, y1, x2, y2, _ = BTN_CON
+        bg = COR_BTN_HV if hover == 0 else COR_BTN_BG
+        cv2.rectangle(img, (x1, y1), (x2, y2), bg, -1)
+        cv2.rectangle(img, (x1, y1), (x2, y2), COR_BORDA, 1)
+        cv2.putText(img, 'Conectar ao ESP32', (x1 + 14, y1 + 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, COR_TITULO, 1, cv2.LINE_AA)
 
-        # Botão Sem ESP
-        idx_ne = n
-        x1, y1, x2, y2, _ = rects[idx_ne]
-        bg = COR_NOESP_HV if hover == idx_ne else COR_NOESP_BG
+        # Botão Sem Wi-Fi
+        x1, y1, x2, y2, _ = BTN_SKIP
+        bg = COR_SKIP_HV if hover == 1 else COR_SKIP_BG
         cv2.rectangle(img, (x1, y1), (x2, y2), bg, -1)
         cv2.rectangle(img, (x1, y1), (x2, y2), (90, 55, 55), 1)
-        cv2.putText(img, 'Continuar sem ESP', (x1 + 14, y1 + 32),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, COR_NOESP_TX, 1, cv2.LINE_AA)
+        cv2.putText(img, 'Continuar sem ESP32', (x1 + 14, y1 + 32),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.58, COR_SKIP_TX, 1, cv2.LINE_AA)
 
-        # Botão Refresh
-        idx_rf = n + 1
-        x1, y1, x2, y2, _ = rects[idx_rf]
-        bg = COR_REF_HV if hover == idx_rf else COR_REF_BG
-        cv2.rectangle(img, (x1, y1), (x2, y2), bg, -1)
-        cv2.rectangle(img, (x1, y1), (x2, y2), (70, 70, 100), 1)
-        cv2.putText(img, 'Atualizar lista de portas', (x1 + 14, y1 + 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, COR_CINZA, 1, cv2.LINE_AA)
-
-        # Mensagem de status
-        cv2.putText(img, msg, (ITEM_X, h - 12),
+        cv2.putText(img, msg, (30, WIN_H - 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, msg_cor, 1, cv2.LINE_AA)
-
-        return img, rects
-
+        return img
 
     def mouse_cb(event, mx, my, flags, param):
-        portas = portas_ref[0]
-        rects  = _rects(portas)
-
-        # Detecta hover
         hover = -1
-        for i, (x1, y1, x2, y2, _) in enumerate(rects):
+        for i, (x1, y1, x2, y2, _) in enumerate(RECTS):
             if x1 <= mx <= x2 and y1 <= my <= y2:
                 hover = i
                 break
@@ -484,62 +470,76 @@ def menu_conexao_grafico():
         if event != cv2.EVENT_LBUTTONDOWN or hover < 0:
             return
 
-        _, _, _, _, tag = rects[hover]
+        _, _, _, _, tag = RECTS[hover]
 
-        if tag == '__REFRESH__':
-            portas_ref[0] = _get_portas_usb()
-            n = len(portas_ref[0])
-            state['msg']    = f'{n} porta(s) encontrada(s)'
-            state['msg_cor'] = COR_SUB
-
-        elif tag == '__NO_ESP__':
+        if tag == '__SKIP__':
             state['conecEsp'] = '2'
             state['done']     = True
 
-        else:
-            # Apenas marca a porta — a conexão é feita no loop principal.
-            # Não chamar imshow/waitKey aqui: o Qt não permite dentro de callbacks.
-            state['connecting'] = tag
-            state['msg']    = f'Conectando em {tag}...'
+        elif tag == '__CONNECT__':
+            state['connecting'] = True
+            state['msg']     = f'Testando UDP em {ESP32_IP}:{ESP32_PORT}...'
             state['msg_cor'] = COR_SUB
 
-    # Renderiza o primeiro frame ANTES de registrar o mouse callback.
-    # O Qt só cria a janela de fato após o primeiro imshow + waitKey.
-    _img0, _ = _draw(portas_ref[0], -1, state['msg'], state['msg_cor'])
-    cv2.imshow(WIN, _img0)
+    img0 = _draw(-1, state['msg'], state['msg_cor'])
+    cv2.imshow(WIN, img0)
     cv2.waitKey(1)
-
     cv2.setMouseCallback(WIN, mouse_cb)
 
     while not state['done']:
-        # Conexão serial feita aqui (fora do callback) para poder usar imshow/waitKey.
         if state.get('connecting'):
-            tag = state.pop('connecting')
+            state.pop('connecting')
             try:
-                state['esp']      = serial.Serial(tag, velocComunc, timeout=2)
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(2.0)
+                sock.bind(('', PC_PORT))
+                # Envia um ping vazio para ver se o ESP32 responde (opcional)
+                sock.sendto(b'PING', (ESP32_IP, ESP32_PORT))
+                state['sock']     = sock
                 state['conecEsp'] = '1'
-                state['msg']      = f'Conectado em {tag}!'
+                state['msg']      = f'UDP pronto! Enviando para {ESP32_IP}:{ESP32_PORT}'
                 state['msg_cor']  = COR_OK
-                portas = portas_ref[0]
-                img, _ = _draw(portas, state['hover'], state['msg'], state['msg_cor'])
+                img = _draw(state['hover'], state['msg'], state['msg_cor'])
                 cv2.imshow(WIN, img)
                 cv2.waitKey(900)
                 state['done'] = True
             except Exception as e:
-                state['msg']    = f'Erro: {str(e)[:65]}'
+                state['msg']     = f'Erro: {str(e)[:70]}'
                 state['msg_cor'] = COR_ERR
 
-        portas = portas_ref[0]
-        img, _ = _draw(portas, state['hover'], state['msg'], state['msg_cor'])
+        img = _draw(state['hover'], state['msg'], state['msg_cor'])
         cv2.imshow(WIN, img)
-        if cv2.waitKey(50) == 27:   # ESC = sem ESP
+        if cv2.waitKey(50) == 27:
             break
 
     cv2.destroyAllWindows()
-    return state['esp'], state['conecEsp']
+    return state['sock'], state['conecEsp']
 
 
 esp, conecEsp = menu_conexao_grafico()
+
+# Thread para receber respostas UDP do ESP32 (ex: CAL)
+_udp_inbox = []  # lista de strings recebidas
+_udp_lock  = threading.Lock()
+
+def _udp_recv_thread(sock):
+    """Fica escutando respostas UDP do ESP32 em background."""
+    sock.settimeout(0.5)
+    while True:
+        try:
+            data, _ = sock.recvfrom(64)
+            msg = data.decode('utf-8', errors='ignore').strip()
+            if msg:
+                with _udp_lock:
+                    _udp_inbox.append(msg)
+        except socket.timeout:
+            pass
+        except Exception:
+            break
+
+if conecEsp == '1' and esp is not None:
+    t = threading.Thread(target=_udp_recv_thread, args=(esp,), daemon=True)
+    t.start()
 
 
 # ============================================================
@@ -675,29 +675,30 @@ while True:
         # Joelho
         angJe = _compute('JE', ['HIP_L', 'KNEE_L', 'ANKLE_L'], lambda: angle_knee(W, Rmat, 'L'))
         angJd = _compute('JD', ['HIP_R', 'KNEE_R', 'ANKLE_R'], lambda: angle_knee(W, Rmat, 'R'))
+        # Tornozelo (dorsiflexo/plantarflexo)
+        angTe = _compute('TE', ['KNEE_L', 'ANKLE_L', 'HEEL_L'], lambda: angle_ankle(W, Rmat, 'L'))
+        angTd = _compute('TD', ['KNEE_R', 'ANKLE_R', 'HEEL_R'], lambda: angle_ankle(W, Rmat, 'R'))
 
         # ---- Comunicação com esp (protocolo idêntico ao original) ----
         if conecEsp == '1':
-            # Checa se o ESP32 enviou algum comando (ex: calibração pelo controle)
-            if esp.in_waiting > 0:
-                try:
-                    linha = esp.readline().decode('utf-8', errors='ignore').strip()
+            # Checa se o ESP32 enviou algum comando via UDP (ex: calibração pelo controle)
+            with _udp_lock:
+                while _udp_inbox:
+                    linha = _udp_inbox.pop(0)
                     if "CAL" in linha:
                         _waist_zero_rad[0] += _raw_waist[0] * (math.pi / 180.0)
                         _head_zero_rad[0] += _raw_head[0] * (math.pi / 180.0)
                         _calib_msg_frames[0] = 30
                         print(f'Calibrado! Cintura zero={math.degrees(_waist_zero_rad[0]):.1f}, Cabeça zero={math.degrees(_head_zero_rad[0]):.1f}')
-                except:
-                    pass
 
-            # Envia todos os 14 ângulos em uma única escrita para reduzir syscalls
+            # Envia todos os 16 ângulos via UDP em um único datagrama
             pacote = (
                 f"{angBd}q{angBe}w{angC}e{angBraE}r{angBraD}t"
                 f"{angCotE}y{angCotD}u{angPe}i{angPd}o"
                 f"{angCoxE}p{angCoxD}a{angJe}s{angJd}d{angCi}f"
+                f"{angTe}g{angTd}h"
             )
-            esp.write(pacote.encode())
-            esp.flush()
+            esp.sendto(pacote.encode(), (ESP32_IP, ESP32_PORT))
 
         # ---- HUD: ângulo de cada servo ao lado do ponto correspondente ----
         put_hud(vid, f'Ca:{angC}',              (nariz.x * w,     nariz.y * h))
@@ -725,6 +726,12 @@ while True:
         put_hud(vid, f'FE:{angCoxE}',           (quadrilE.x * w,  quadrilE.y * h), offset=(8, 8))
         put_hud(vid, f'JD:{angJd}',             (joelhoD.x * w,   joelhoD.y * h))
         put_hud(vid, f'JE:{angJe}',             (joelhoE.x * w,   joelhoE.y * h))
+
+        # Tornozelos: usa posição 2D do landmark de tornozelo
+        tornozeloE = points.landmark[pose.PoseLandmark.LEFT_ANKLE]
+        tornozeloD = points.landmark[pose.PoseLandmark.RIGHT_ANKLE]
+        put_hud(vid, f'TE:{angTe}', (tornozeloE.x * w, tornozeloE.y * h))
+        put_hud(vid, f'TD:{angTd}', (tornozeloD.x * w, tornozeloD.y * h))
 
     cv2.imshow('video', vid)
     vid = cv2.flip(vid, 1)
