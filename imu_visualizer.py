@@ -113,9 +113,9 @@ class IMUState:
                 # Quando a aceleração total está perto de 1g (sem choques bruscos)
                 if 0.65 < norm_a < 1.35:
                     # Inclinação frontal (Pitch): eixo Y é a dobradiça (X=cabeça, Z=peito)
-                    pitch_acc = math.degrees(math.atan2(-az, ax))
+                    pitch_acc = math.degrees(math.atan2(az, ax))
                     # Inclinação lateral (Roll): eixo Z é a dobradiça (X=cabeça, Y=braço D)
-                    roll_acc  = math.degrees(math.atan2(ay, math.sqrt(ax**2 + az**2)))
+                    roll_acc  = math.degrees(math.atan2(-ay, math.sqrt(ax**2 + az**2)))
 
                     alpha = 0.95
                     self.pitch = alpha * (self.pitch + gy * dt) + (1.0 - alpha) * pitch_acc
@@ -130,8 +130,8 @@ class IMUState:
                 # Inicialização a partir do vetor gravidade
                 norm_a = math.sqrt(ax**2 + ay**2 + az**2)
                 if norm_a > 0.2:
-                    self.pitch = math.degrees(math.atan2(-az, ax))
-                    self.roll  = math.degrees(math.atan2(ay, math.sqrt(ax**2 + az**2)))
+                    self.pitch = math.degrees(math.atan2(az, ax))
+                    self.roll  = math.degrees(math.atan2(-ay, math.sqrt(ax**2 + az**2)))
                 self.yaw = 0.0
 
             self._last_t = now
@@ -162,8 +162,8 @@ class IMUState:
         with self.lock:
             norm_a = math.sqrt(self.ax**2 + self.ay**2 + self.az**2)
             if norm_a > 0.2:
-                self.pitch = math.degrees(math.atan2(-self.az, self.ax))
-                self.roll  = math.degrees(math.atan2(self.ay, math.sqrt(self.ax**2 + self.az**2)))
+                self.pitch = math.degrees(math.atan2(self.az, self.ax))
+                self.roll  = math.degrees(math.atan2(-self.ay, math.sqrt(self.ax**2 + self.az**2)))
             else:
                 self.pitch = 0.0
                 self.roll  = 0.0
@@ -262,22 +262,27 @@ def add_arrow3d(ax3d, origin, vec, color, lw=2.2):
 
 def rotation_matrix(roll_deg, pitch_deg, yaw_deg):
     """
-    Matriz de rotação 3D correspondente aos ângulos de Euler (Z-Y-X):
-    roll (inclinação lateral), pitch (inclinação frontal), yaw (giro vertical).
+    Matriz de rotação (corpo → mundo) no referencial do robô, todas destras:
+        yaw   → em torno de X (cabeça, eixo vertical)
+        pitch → em torno de Y (braço D) — positivo = tombar de costas (peito p/ cima)
+        roll  → em torno de Z (peito)   — positivo = tombar p/ a esquerda (braço D p/ cima é negativo)
+    Ordem: R = Rx(yaw) @ Rz(roll) @ Ry(pitch). Assim a gravidade lida no corpo é
+    [cos(r)cos(p), -sin(r), cos(r)sin(p)], coerente com pitch = atan2(az, ax) e
+    roll = atan2(-ay, sqrt(ax² + az²)) usados no filtro complementar.
     """
     r = math.radians(roll_deg)
     p = math.radians(pitch_deg)
     y = math.radians(yaw_deg)
-    Rz = np.array([[math.cos(y), -math.sin(y), 0],
-                   [math.sin(y),  math.cos(y), 0],
-                   [0,            0,            1]])
-    Ry = np.array([[ math.cos(p), 0, math.sin(p)],
-                   [0,            1, 0           ],
-                   [-math.sin(p), 0, math.cos(p)]])
-    Rx = np.array([[1, 0,           0            ],
-                   [0, math.cos(r), -math.sin(r) ],
-                   [0, math.sin(r),  math.cos(r) ]])
-    return Rz @ Ry @ Rx
+    Rx_yaw = np.array([[1, 0,            0           ],
+                       [0, math.cos(y), -math.sin(y) ],
+                       [0, math.sin(y),  math.cos(y) ]])
+    Ry_pitch = np.array([[ math.cos(p), 0, math.sin(p)],
+                         [0,            1, 0           ],
+                         [-math.sin(p), 0, math.cos(p)]])
+    Rz_roll = np.array([[math.cos(r), -math.sin(r), 0],
+                        [math.sin(r),  math.cos(r), 0],
+                        [0,            0,           1]])
+    return Rx_yaw @ Rz_roll @ Ry_pitch
 
 
 def draw_wire_box(ax3d, center, size, R, color, lw=1.2, alpha=0.6):
@@ -489,7 +494,7 @@ def run_visualizer():
         ax3d.set_facecolor(PANEL_COLOR)
         ax3d.set_xlim(-1.2, 1.2); ax3d.set_ylim(-1.2, 1.2); ax3d.set_zlim(-1.2, 1.2)
         ax3d.set_xlabel('Z → Peito',   color=ACCENT_Z, labelpad=2, fontsize=8)
-        ax3d.set_ylabel('Y → Braço D', color=ACCENT_Y, labelpad=2, fontsize=8)
+        ax3d.set_ylabel('← Braço D', color=ACCENT_Y, labelpad=2, fontsize=8)
         ax3d.set_zlabel('X → Cabeça',  color=ACCENT_X, labelpad=2, fontsize=8)
         ax3d.tick_params(colors=GRID_COLOR, labelsize=6)
         ax3d.set_title('Orientação 3D do Tronco', color=TEXT_COLOR, fontsize=10, pad=4)
@@ -499,12 +504,13 @@ def run_visualizer():
             pane.set_edgecolor(GRID_COLOR)
 
         R = rotation_matrix(s['roll'], s['pitch'], s['yaw'])
-        # Permutação: robot X (cabeça) → plot Z (vertical no mpl)
-        #             robot Y (braço D) → plot Y
-        #             robot Z (peito)  → plot X (profundidade)
-        P = np.array([[0, 0, 1],
-                      [0, 1, 0],
-                      [1, 0, 0]], dtype=float)
+        # Rotação própria (det = +1, sem espelhar o modelo):
+        #             robot X (cabeça)  → plot +Z (vertical no mpl)
+        #             robot Y (braço D) → plot -Y
+        #             robot Z (peito)   → plot +X (profundidade)
+        P = np.array([[0,  0, 1],
+                      [0, -1, 0],
+                      [1,  0, 0]], dtype=float)
         RP = P @ R
         O = [0, 0, 0]
 
@@ -521,7 +527,7 @@ def run_visualizer():
 
         # Eixos do Sensor (permutados para plot space)
         ex = RP @ np.array([1, 0, 0])   # cabeça → aponta para cima (+Z plot)
-        ey = RP @ np.array([0, 1, 0])   # braço D → aponta para +Y
+        ey = RP @ np.array([0, 1, 0])   # braço D → aponta para -Y
         ez = RP @ np.array([0, 0, 1])   # peito → aponta para +X
 
         add_arrow3d(ax3d, O, ex * 0.85, ACCENT_X, lw=2.5)
