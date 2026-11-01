@@ -430,9 +430,8 @@ def menu_conexao_grafico():
 
         # Instruções
         instrs = [
-            f'1. No ESP32: grave o firmware e ligue o robô.',
-            f'2. No PC: conecte à rede Wi-Fi  "RoboShadow"  (senha: shadow123).',
-            f'3. Clique em "Conectar" para testar a conexão UDP.',
+            f'1. No PC: conecte à rede Wi-Fi  "RoboShadow"  (senha: shadow123).',
+            f'2. Clique em "Conectar" para testar a conexão UDP.',
             f'   ESP32 IP: {ESP32_IP}   Porta: {ESP32_PORT}',
         ]
         for i, txt in enumerate(instrs):

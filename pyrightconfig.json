@@ -1,0 +1,8 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "off",
+  "reportMissingImports": false,
+  "reportAttributeAccessIssue": false,
+  "reportOptionalMemberAccess": false
+}
