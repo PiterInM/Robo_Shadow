@@ -19,12 +19,19 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Run:
+Run main menu:
 ```bash
-python Program_Shadow.py
+python main.py
+```
+Or run directly:
+```bash
+python Program_Shadow.py   # Modo Shadow
+python imu_visualizer.py   # Visualizador IMU 3D
 ```
 
-The script prompts whether to connect to ESP32 via serial. Press `q` in the video window to exit.
+Desktop integration:
+- `robo-shadow.desktop` installed at `~/.local/share/applications/robo-shadow.desktop` with `StartupWMClass=robo-shadow`.
+- `window_icon.py` sets `_NET_WM_ICON` and `WM_CLASS` on OpenCV windows and Qt desktop properties on Matplotlib figures to ensure the robot icon appears properly in the window titlebar, taskbar/dock, and app switcher.
 
 **Serial port** is hardcoded at line 8 (`/dev/ttyUSB0`). Change it if your ESP32 is on a different port.
 

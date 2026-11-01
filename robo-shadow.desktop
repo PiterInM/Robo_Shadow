@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Robo Shadow
+Comment=Menu de controle do Robo Shadow
+Exec=/home/piter/Documents/Robo_Shadow/.venv/bin/python /home/piter/Documents/Robo_Shadow/main.py
+Icon=/home/piter/Documents/Robo_Shadow/icon.png
+Path=/home/piter/Documents/Robo_Shadow
+Terminal=false
+Categories=Science;Robotics;
+StartupNotify=true
+StartupWMClass=robo-shadow

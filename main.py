@@ -12,6 +12,8 @@ import socket
 import numpy as np
 import cv2
 
+from window_icon import apply_window_icon, setup_window_icon_async
+
 
 WIN_NAME = 'Robo Shadow - Menu Principal'
 WIN_W = 680
@@ -182,10 +184,14 @@ def graphical_menu():
     try:
         cv2.namedWindow(WIN_NAME, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(WIN_NAME, mouse_cb)
+        setup_window_icon_async(WIN_NAME)
 
+        icon_applied = False
         while not state['done']:
             frame = draw_menu(state['hover'])
             cv2.imshow(WIN_NAME, frame)
+            if not icon_applied:
+                icon_applied = apply_window_icon(WIN_NAME)
             key = cv2.waitKey(25) & 0xFF
 
             if key in (ord('1'), ord('2'), ord('3')):

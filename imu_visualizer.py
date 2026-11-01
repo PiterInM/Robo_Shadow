@@ -33,6 +33,8 @@ from matplotlib.patches import FancyArrowPatch
 from mpl_toolkits.mplot3d import Axes3D
 from mpl_toolkits.mplot3d.proj3d import proj_transform
 from collections import deque
+from matplotlib.widgets import Button
+from window_icon import setup_matplotlib_icon
 
 # ── Configuração ─────────────────────────────────────────────
 IMU_RECV_PORT = 4212
@@ -65,6 +67,9 @@ class IMUState:
         self.ax = self.ay = self.az = 0.0
         self.gx = self.gy = self.gz = 0.0
         self.roll = self.pitch = self.yaw = 0.0
+        # Offsets de referência (postura em pé)
+        self.roll_ref = self.pitch_ref = self.yaw_ref = 0.0
+        self.ref_set = False  # True após o primeiro "Em Pé" ser definido
         self._last_t = None
         self.connected = False
         self.pkt_count = 0
@@ -142,7 +147,11 @@ class IMUState:
             return {
                 'ax': self.ax, 'ay': self.ay, 'az': self.az,
                 'gx': self.gx, 'gy': self.gy, 'gz': self.gz,
-                'roll': self.roll, 'pitch': self.pitch, 'yaw': self.yaw,
+                # Ângulos corrigidos pelo offset de referência (postura em pé = 0°)
+                'roll':  self.roll  - self.roll_ref,
+                'pitch': self.pitch - self.pitch_ref,
+                'yaw':   self.yaw   - self.yaw_ref,
+                'ref_set': self.ref_set,
                 'connected': is_alive, 'pkt_count': self.pkt_count, 'hz': self.hz,
                 't':    list(self.t_hist),
                 'ax_h': list(self.ax_hist), 'ay_h': list(self.ay_hist), 'az_h': list(self.az_hist),
@@ -159,6 +168,16 @@ class IMUState:
                 self.pitch = 0.0
                 self.roll  = 0.0
             self.yaw = 0.0
+
+    def set_upright_reference(self):
+        """Salva a orientação atual como referência de 'em pé' (zero relativo)."""
+        with self.lock:
+            self.roll_ref  = self.roll
+            self.pitch_ref = self.pitch
+            self.yaw_ref   = self.yaw
+            self.ref_set   = True
+        print('[IMU] Referência "em pé" definida: '
+              f'roll={self.roll_ref:.1f}°  pitch={self.pitch_ref:.1f}°  yaw={self.yaw_ref:.1f}°')
 
 
 imu = IMUState()
@@ -289,6 +308,7 @@ def setup_figure():
         fig.canvas.manager.set_window_title('Robo Shadow — IMU 3D Realtime (MPU-6050)')
     except Exception:
         pass
+    setup_matplotlib_icon(fig)
 
     gs = gridspec.GridSpec(3, 3, figure=fig,
                            left=0.04, right=0.98,
@@ -345,20 +365,43 @@ def setup_figure():
                          va='bottom', color=TEXT_COLOR, fontsize=8.5, fontfamily='monospace',
                          bbox=dict(boxstyle='round,pad=0.5', facecolor=PANEL_COLOR, edgecolor=GRID_COLOR))
 
-    fig.text(0.70, 0.015, '[R] Zerar ângulos   |   [C] Re-calibrar MPU   |   [Q] Sair',
+    fig.text(0.70, 0.015,
+             '[U] Em Pé (referência)   |   [R] Zerar ângulos   |   [C] Re-calibrar MPU   |   [Q] Sair',
              ha='center', color=TEXT_MUTED, fontsize=8)
+
+    # Botão "Em Pé" — define referência de postura ereta
+    btn_ax = fig.add_axes([0.04, 0.005, 0.13, 0.038])
+    btn_upright = Button(
+        btn_ax, '🤖  Em Pé',
+        color=PANEL_COLOR, hovercolor='#1f6feb'
+    )
+    btn_upright.label.set_color(TEXT_COLOR)
+    btn_upright.label.set_fontsize(9)
+    btn_upright.label.set_fontweight('bold')
+    for spine in btn_ax.spines.values():
+        spine.set_edgecolor('#1f6feb')
+        spine.set_linewidth(1.5)
 
     accel_axes = [ax_acx, ax_acy, ax_acz]
     gyro_axes  = [ax_gyx, ax_gyy, ax_gyz]
 
-    return fig, ax3d, accel_axes, gyro_axes, status_txt, angles_txt, accel_txt
+    return fig, ax3d, accel_axes, gyro_axes, status_txt, angles_txt, accel_txt, btn_upright
 
 
 # ── Loop Principal da Interface Gráfica ───────────────────────
 def run_visualizer():
-    fig, ax3d, accel_axes, gyro_axes, status_txt, angles_txt, accel_txt = setup_figure()
+    fig, ax3d, accel_axes, gyro_axes, status_txt, angles_txt, accel_txt, btn_upright = setup_figure()
     ax_acx, ax_acy, ax_acz = accel_axes
     ax_gyx, ax_gyy, ax_gyz = gyro_axes
+
+    # Estado de flash de confirmação do botão
+    _ref_flash = {'until': 0.0}
+
+    def do_set_upright(_event=None):
+        imu.set_upright_reference()
+        _ref_flash['until'] = time.monotonic() + 2.5
+
+    btn_upright.on_clicked(do_set_upright)
 
     line_ax, = ax_acx.plot([], [], color=ACCENT_X, lw=1.3)
     line_ay, = ax_acy.plot([], [], color=ACCENT_Y, lw=1.3)
@@ -368,7 +411,9 @@ def run_visualizer():
     line_gz, = ax_gyz.plot([], [], color=GYRO3,    lw=1.3)
 
     def on_key(event):
-        if event.key in ('r', 'R'):
+        if event.key in ('u', 'U'):
+            do_set_upright()
+        elif event.key in ('r', 'R'):
             imu.reset_angles()
             print('[IMU] Ângulos de referência zerados.')
         elif event.key in ('c', 'C'):
@@ -382,10 +427,18 @@ def run_visualizer():
     def update(_):
         s = imu.snapshot()
 
+        # Flash de confirmação da referência
+        if time.monotonic() < _ref_flash['until']:
+            status_txt.set_text('✔ Referência "Em Pé" definida! Ângulos zerados na postura atual.')
+            status_txt.set_color('#ffa657')
+            fig.canvas.draw_idle()
+            return
+
         # Atualiza Status de Conexão
         if s['connected']:
             norm_a = math.sqrt(s["ax"]**2 + s["ay"]**2 + s["az"]**2)
-            status_txt.set_text(f'● CONECTADO — {s["hz"]:.0f} Hz ({s["pkt_count"]} pacotes)  |  Gravidade resultante: {norm_a:.2f}g')
+            ref_indicator = '  |  📐 Ref: OK' if s['ref_set'] else ''
+            status_txt.set_text(f'● CONECTADO — {s["hz"]:.0f} Hz ({s["pkt_count"]} pacotes)  |  Gravidade: {norm_a:.2f}g{ref_indicator}')
             status_txt.set_color('#3fb950')
         else:
             try:
@@ -418,16 +471,14 @@ def run_visualizer():
         )
 
         # ── Renderização 3D ──
-        # Preserva rotação manual da câmera feita pelo usuário via mouse
-        cur_elev = ax3d.elev
-        cur_azim = ax3d.azim
+        # Câmera fixa numa perspectiva frontal — o modelo gira via matriz R
         ax3d.cla()
-        ax3d.view_init(elev=cur_elev, azim=cur_azim)
+        ax3d.view_init(elev=20, azim=-60)
         ax3d.set_facecolor(PANEL_COLOR)
         ax3d.set_xlim(-1.2, 1.2); ax3d.set_ylim(-1.2, 1.2); ax3d.set_zlim(-1.2, 1.2)
-        ax3d.set_xlabel('X → Cabeça', color=ACCENT_X, labelpad=2, fontsize=8)
+        ax3d.set_xlabel('Z → Peito',   color=ACCENT_Z, labelpad=2, fontsize=8)
         ax3d.set_ylabel('Y → Braço D', color=ACCENT_Y, labelpad=2, fontsize=8)
-        ax3d.set_zlabel('Z → Peito',   color=ACCENT_Z, labelpad=2, fontsize=8)
+        ax3d.set_zlabel('X → Cabeça',  color=ACCENT_X, labelpad=2, fontsize=8)
         ax3d.tick_params(colors=GRID_COLOR, labelsize=6)
         ax3d.set_title('Orientação 3D do Tronco', color=TEXT_COLOR, fontsize=10, pad=4)
 
@@ -436,22 +487,30 @@ def run_visualizer():
             pane.set_edgecolor(GRID_COLOR)
 
         R = rotation_matrix(s['roll'], s['pitch'], s['yaw'])
+        # Permutação: robot X (cabeça) → plot Z (vertical no mpl)
+        #             robot Y (braço D) → plot Y
+        #             robot Z (peito)  → plot X (profundidade)
+        P = np.array([[0, 0, 1],
+                      [0, 1, 0],
+                      [1, 0, 0]], dtype=float)
+        RP = P @ R
         O = [0, 0, 0]
 
-        # Modelo Esquemático do Tronco do Robô (Gira junto com o sensor)
-        # Torso: [altura em X, largura em Y, profundidade em Z]
-        draw_wire_box(ax3d, [0, 0, 0], [0.55, 0.42, 0.22], R, color='#58a6ff', lw=1.2, alpha=0.7)
-        # Cabeça no topo (+X)
-        draw_wire_box(ax3d, [0.38, 0, 0], [0.20, 0.20, 0.20], R, color='#79c0ff', lw=1.0, alpha=0.6)
-        # Ombro / Braço Direito (+Y)
-        draw_wire_box(ax3d, [0.15, 0.28, 0], [0.12, 0.16, 0.14], R, color=ACCENT_Y, lw=1.0, alpha=0.6)
-        # Ombro / Braço Esquerdo (-Y)
-        draw_wire_box(ax3d, [0.15, -0.28, 0], [0.12, 0.16, 0.14], R, color='#a371f7', lw=1.0, alpha=0.6)
+        # Modelo Esquemático do Tronco do Robô — centros e tamanhos em coordenadas
+        # do robô (espaço local). A matriz RP=P@R aplica a permutação automaticamente.
+        # Torso: altura em X (cabeça), largura em Y (braços), profundidade em Z (peito)
+        draw_wire_box(ax3d, [0, 0, 0],        [0.55, 0.42, 0.22], RP, color='#58a6ff', lw=1.2, alpha=0.7)
+        # Cabeça no topo (+X robot)
+        draw_wire_box(ax3d, [0.38, 0, 0],     [0.20, 0.20, 0.20], RP, color='#79c0ff', lw=1.0, alpha=0.6)
+        # Ombro / Braço Direito (+Y robot)
+        draw_wire_box(ax3d, [0.15, 0.28, 0],  [0.12, 0.16, 0.14], RP, color=ACCENT_Y, lw=1.0, alpha=0.6)
+        # Ombro / Braço Esquerdo (-Y robot)
+        draw_wire_box(ax3d, [0.15, -0.28, 0], [0.12, 0.16, 0.14], RP, color='#a371f7', lw=1.0, alpha=0.6)
 
-        # Eixos do Sensor (rotacionados)
-        ex = R @ np.array([1, 0, 0])
-        ey = R @ np.array([0, 1, 0])
-        ez = R @ np.array([0, 0, 1])
+        # Eixos do Sensor (permutados para plot space)
+        ex = RP @ np.array([1, 0, 0])   # cabeça → aponta para cima (+Z plot)
+        ey = RP @ np.array([0, 1, 0])   # braço D → aponta para +Y
+        ez = RP @ np.array([0, 0, 1])   # peito → aponta para +X
 
         add_arrow3d(ax3d, O, ex * 0.85, ACCENT_X, lw=2.5)
         add_arrow3d(ax3d, O, ey * 0.85, ACCENT_Y, lw=2.5)
@@ -461,9 +520,10 @@ def run_visualizer():
         ax3d.text(*(ey * 0.98), '+Y\nBRAÇO D', color=ACCENT_Y, fontsize=7.5, fontweight='bold', ha='center')
         ax3d.text(*(ez * 0.98), '+Z\nPEITO',  color=ACCENT_Z, fontsize=7.5, fontweight='bold', ha='center')
 
-        # Vetor de Aceleração Resultante (em amarelo)
+        # Vetor de Aceleração Resultante (permutado para plot space)
         if norm_a > 0.05:
-            av = np.array([s['ax'], s['ay'], s['az']]) * ARROW_SCALE_ACCEL
+            av_robot = np.array([s['ax'], s['ay'], s['az']]) * ARROW_SCALE_ACCEL
+            av = P @ av_robot
             add_arrow3d(ax3d, O, av, ACCEL_VEC, lw=2.8)
             tip = av * 1.08
             ax3d.text(*tip, f'{norm_a:.2f}g', color=ACCEL_VEC, fontsize=8, fontweight='bold')
@@ -496,6 +556,9 @@ def run_visualizer():
             line.set_data(xs, data)
             ax_s.set_xlim(x_min, x_max)
             ax_s.set_ylim(-max_g * 1.2, max_g * 1.2)
+
+        # Força redesenho de todos os subplots a cada tick
+        fig.canvas.draw_idle()
 
     timer = fig.canvas.new_timer(interval=UPDATE_MS)
     timer.add_callback(update, None)

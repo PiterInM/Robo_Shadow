@@ -6,6 +6,8 @@ import numpy as np
 import socket
 import threading
 
+from window_icon import setup_window_icon_async, apply_window_icon
+
 # ============================================================
 # Configurações e constantes
 # ============================================================
@@ -483,6 +485,8 @@ def menu_conexao_grafico():
     img0 = _draw(-1, state['msg'], state['msg_cor'])
     cv2.imshow(WIN, img0)
     cv2.waitKey(1)
+    setup_window_icon_async(WIN)
+    icon_applied = apply_window_icon(WIN)
     cv2.setMouseCallback(WIN, mouse_cb)
 
     while not state['done']:
@@ -508,6 +512,8 @@ def menu_conexao_grafico():
 
         img = _draw(state['hover'], state['msg'], state['msg_cor'])
         cv2.imshow(WIN, img)
+        if not icon_applied:
+            icon_applied = apply_window_icon(WIN)
         if cv2.waitKey(50) == 27:
             break
 
@@ -560,6 +566,9 @@ last_servo = {k: v['zero_deg'] for k, v in SERVO_MAP.items()}
 # ============================================================
 # Loop principal
 # ============================================================
+
+setup_window_icon_async('video')
+_video_icon_applied = False
 
 while True:
     _raw_waist = [0.0]  # reset a cada frame; atualizado em _waist_fn se pose detectada
@@ -733,6 +742,8 @@ while True:
         put_hud(vid, f'TD:{angTd}', (tornozeloD.x * w, tornozeloD.y * h))
 
     cv2.imshow('video', vid)
+    if not _video_icon_applied:
+        _video_icon_applied = apply_window_icon('video')
     vid = cv2.flip(vid, 1)
 
     key = cv2.waitKey(1)
