@@ -19,6 +19,11 @@ WIN_NAME = 'Robo Shadow - Menu Principal'
 WIN_W = 680
 WIN_H = 450
 
+# Rede Wi-Fi criada pelo ESP32 (Access Point) — ver 4_shadow_esp32_completo.ino
+ROBOSHADOW_SSID = 'RoboShadow'
+ROBOSHADOW_PASS = 'shadow123'
+WIFI_NMCLI_TIMEOUT = 20  # segundos
+
 # Paleta de cores idêntica ao Program_Shadow.py
 COR_BG       = ( 18,  22,  30)
 COR_TITULO   = (100, 210, 255)
@@ -68,6 +73,76 @@ BUTTONS = [
         'bg_hov':  ( 80,  40,  40),
     },
 ]
+
+
+def _run_nmcli(args, timeout=10):
+    try:
+        return subprocess.run(['nmcli'] + args, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        print(f"[WiFi] Falha ao executar nmcli: {e}")
+        return None
+
+
+def _active_wifi_connection():
+    """Retorna o nome da conexão Wi-Fi ativa no momento, ou None."""
+    r = _run_nmcli(['-t', '-f', 'NAME,TYPE', 'connection', 'show', '--active'])
+    if not r or r.returncode != 0:
+        return None
+    for line in r.stdout.strip().splitlines():
+        parts = line.split(':')
+        if len(parts) >= 2 and parts[1] == '802-11-wireless':
+            return parts[0]
+    return None
+
+
+def _has_saved_connection(name):
+    """Verifica se já existe um perfil de conexão salvo com esse nome."""
+    r = _run_nmcli(['-t', '-f', 'NAME', 'connection', 'show'])
+    if not r or r.returncode != 0:
+        return False
+    return name in r.stdout.strip().splitlines()
+
+
+def connect_roboshadow_wifi():
+    """Troca para a rede Wi-Fi do robô. Retorna o nome da rede anterior (ou None se
+    não havia nenhuma, ou se já estava conectado à RoboShadow)."""
+    prev = _active_wifi_connection()
+    if prev == ROBOSHADOW_SSID:
+        return None
+
+    print(f"\n📡  Conectando à rede Wi-Fi '{ROBOSHADOW_SSID}'...")
+    if _has_saved_connection(ROBOSHADOW_SSID):
+        # Já existe um perfil salvo (de uma conexão manual anterior, por exemplo):
+        # reativar por nome evita um bug do nmcli em que "device wifi connect
+        # ... password ..." falha com "key-mgmt: property is missing" quando já
+        # há um perfil salvo com o mesmo nome.
+        r = _run_nmcli(['connection', 'up', ROBOSHADOW_SSID], timeout=WIFI_NMCLI_TIMEOUT)
+    else:
+        r = _run_nmcli(
+            ['device', 'wifi', 'connect', ROBOSHADOW_SSID, 'password', ROBOSHADOW_PASS],
+            timeout=WIFI_NMCLI_TIMEOUT,
+        )
+    if r and r.returncode == 0:
+        print(f"✔  Conectado à '{ROBOSHADOW_SSID}'.")
+    else:
+        err = r.stderr.strip() if r else 'nmcli indisponível'
+        print(f"⚠  Não foi possível conectar à '{ROBOSHADOW_SSID}' automaticamente: {err}")
+        print("   Prosseguindo mesmo assim — conecte manualmente se necessário.")
+        return None
+    return prev
+
+
+def restore_previous_wifi(prev_name):
+    """Restaura a rede Wi-Fi que estava ativa antes de conectar à RoboShadow."""
+    if not prev_name:
+        return
+    print(f"\n📡  Restaurando rede Wi-Fi anterior '{prev_name}'...")
+    r = _run_nmcli(['connection', 'up', prev_name], timeout=WIFI_NMCLI_TIMEOUT)
+    if r and r.returncode == 0:
+        print(f"✔  Reconectado à '{prev_name}'.")
+    else:
+        err = r.stderr.strip() if r else 'nmcli indisponível'
+        print(f"⚠  Não foi possível restaurar '{prev_name}' automaticamente: {err}")
 
 
 def run_shadow():
@@ -200,6 +275,10 @@ def graphical_menu():
             elif key in (ord('q'), ord('Q'), 27):  # 'q' ou ESC
                 state['selected'] = 'q'
                 state['done'] = True
+            elif cv2.getWindowProperty(WIN_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                # Janela fechada pelo usuário (botão X): encerra em vez de reabrir.
+                state['selected'] = 'q'
+                state['done'] = True
 
         cv2.destroyAllWindows()
         return state['selected']
@@ -239,19 +318,23 @@ def main():
     if os.path.isfile(_venv_python) and sys.executable != _venv_python:
         os.execv(_venv_python, [_venv_python] + sys.argv)
 
-    choice = graphical_menu()
-    if choice is None:
-        choice = terminal_menu()
+    while True:
+        choice = graphical_menu()
+        if choice is None:
+            choice = terminal_menu()
 
-    if choice == '1':
-        run_shadow()
-    elif choice == '2':
-        run_imu()
-    elif choice == '3':
-        run_both()
-    elif choice in ('q', 'exit', 'sair'):
-        print("Saindo.")
-        sys.exit(0)
+        if choice in ('1', '2', '3'):
+            prev_wifi = connect_roboshadow_wifi()
+            if choice == '1':
+                run_shadow()
+            elif choice == '2':
+                run_imu()
+            elif choice == '3':
+                run_both()
+            restore_previous_wifi(prev_wifi)
+        elif choice in ('q', 'exit', 'sair'):
+            print("Saindo.")
+            sys.exit(0)
 
 
 if __name__ == '__main__':

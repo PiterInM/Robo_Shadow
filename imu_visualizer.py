@@ -424,7 +424,19 @@ def run_visualizer():
 
     fig.canvas.mpl_connect('key_press_event', on_key)
 
+    _closed = {'flag': False}
+
+    def on_close(_event):
+        # Janela fechada pelo usuário (botão X): trava o timer para não redesenhar
+        # uma figura destruída e encerra o programa normalmente.
+        _closed['flag'] = True
+        timer.stop()
+
+    fig.canvas.mpl_connect('close_event', on_close)
+
     def update(_):
+        if _closed['flag']:
+            return
         s = imu.snapshot()
 
         # Flash de confirmação da referência

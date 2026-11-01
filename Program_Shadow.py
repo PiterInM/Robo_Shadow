@@ -1,4 +1,5 @@
 # Importação de bibliotecas OpenCV, MediaPipe, Math, NumPy e Socket UDP
+import sys
 import cv2
 import mediapipe as mp
 import math
@@ -516,6 +517,11 @@ def menu_conexao_grafico():
             icon_applied = apply_window_icon(WIN)
         if cv2.waitKey(50) == 27:
             break
+        if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
+            # Janela fechada pelo usuário (botão X): encerra o programa inteiro.
+            cv2.destroyAllWindows()
+            print("\nJanela de conexão fechada. Encerrando.")
+            sys.exit(0)
 
     cv2.destroyAllWindows()
     return state['sock'], state['conecEsp']
@@ -755,6 +761,10 @@ while True:
         _head_zero_rad[0] += _raw_head[0] * (math.pi / 180.0)
         _calib_msg_frames[0] = 30
         print(f'Calibrado! Cintura zero={math.degrees(_waist_zero_rad[0]):.1f}, Cabeça zero={math.degrees(_head_zero_rad[0]):.1f}')
+
+    if cv2.getWindowProperty('video', cv2.WND_PROP_VISIBLE) < 1:
+        # Janela de vídeo fechada pelo usuário (botão X): encerra em vez de reabrir.
+        break
 
 
 video.release()
